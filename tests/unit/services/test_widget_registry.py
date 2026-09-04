@@ -227,3 +227,34 @@ class TestWidgetRegistryDefaults:
 
         assert metadata.default_width >= 50
         assert metadata.default_height >= 20
+
+
+class TestPlaceWidget:
+    """The place-name overlay widget."""
+
+    def test_place_widget_is_registered(self):
+        meta = widget_registry.get_metadata("place")
+        assert meta is not None
+        assert meta.type == "place"
+
+    def test_place_is_a_text_category_widget(self):
+        assert widget_registry.get_metadata("place").category == WidgetCategory.TEXT
+
+    def test_place_exposes_position_and_text_styling(self):
+        names = {p.name for p in widget_registry.get_metadata("place").properties}
+        assert {"x", "y", "size", "rgb", "outline", "outline_width", "align"} <= names
+
+    def test_place_exposes_a_language_property_defaulting_to_english(self):
+        lang = next(p for p in widget_registry.get_metadata("place").properties if p.name == "lang")
+        assert lang.constraints.default == "en"
+
+    def test_place_description_carries_data_attribution(self):
+        """Attribution surfaces in the property panel."""
+        desc = widget_registry.get_metadata("place").description
+        assert "OpenStreetMap" in desc and "GeoNames" in desc
+
+    def test_place_is_not_a_box_sized_widget(self):
+        """'size' must mean font size, as for other text widgets."""
+        meta = widget_registry.get_metadata("place")
+        size = next(p for p in meta.properties if p.name == "size")
+        assert size.label == "Font Size"
