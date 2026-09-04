@@ -30,6 +30,7 @@ from gpstitch.constants import (
     UNIT_OPTIONS,
     is_pycairo_available,
 )
+from gpstitch.patches.place_patches import preview_budget
 from gpstitch.scripts.gopro_dashboard_wrapper import (
     TS_DJI_META_SOURCE_ARG,
     TS_ODO_OFFSET_ARG,
@@ -1368,18 +1369,22 @@ def render_preview(
             _apply_timeseries_processing(timeseries)
             framemeta = timeseries_to_framemeta(timeseries, units)
 
-        # Parse the layout XML
-        create_widgets = layout_from_xml(
-            layout_xml,
-            renderer=renderer,
-            framemeta=framemeta,
-            font=font,
-            privacy=privacy,
-            converters=converters,
-        )
+        # Parse the layout XML.
+        # Widget creation happens inside Overlay(), which is where a place
+        # widget builds its track - so both calls sit inside preview_budget()
+        # to keep an uncached lookup from freezing the editor.
+        with preview_budget():
+            create_widgets = layout_from_xml(
+                layout_xml,
+                renderer=renderer,
+                framemeta=framemeta,
+                font=font,
+                privacy=privacy,
+                converters=converters,
+            )
 
-        # Create overlay
-        overlay = Overlay(framemeta, create_widgets)
+            # Create overlay
+            overlay = Overlay(framemeta, create_widgets)
 
         # Draw at specified time
         pts = timeunits(millis=frame_time_ms)
@@ -1568,16 +1573,19 @@ def _render_layout_with_data(
             _apply_timeseries_processing(timeseries)
             framemeta = timeseries_to_framemeta(timeseries, units)
 
-        create_widgets = layout_from_xml(
-            xml_content,
-            renderer=renderer,
-            framemeta=framemeta,
-            font=font,
-            privacy=privacy,
-            converters=converters,
-        )
+        # See render_preview: widget creation, and therefore place-track
+        # construction, happens inside Overlay().
+        with preview_budget():
+            create_widgets = layout_from_xml(
+                xml_content,
+                renderer=renderer,
+                framemeta=framemeta,
+                font=font,
+                privacy=privacy,
+                converters=converters,
+            )
 
-        overlay = Overlay(framemeta, create_widgets)
+            overlay = Overlay(framemeta, create_widgets)
         pts = timeunits(millis=frame_time_ms)
         image = overlay.draw(pts, image)
 

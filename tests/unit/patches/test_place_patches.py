@@ -117,3 +117,55 @@ class TestCreatePlace:
         element = ET.fromstring('<component type="place" colour="red"/>')
         with pytest.raises(Exception):  # noqa: B017 - library raises its own Defect type
             _factory(FakeFrameMeta()).create_place(element, entry=lambda: None, resolver=StubResolver())
+
+
+class TestPreviewBudget:
+    """Preview gets a smaller lookup budget than render."""
+
+    def test_preview_budget_limits_lookups(self, monkeypatch):
+        from gpstitch.config import settings
+        from gpstitch.patches import place_patches
+
+        monkeypatch.setattr(settings, "place_preview_max_lookups", 3)
+        monkeypatch.setattr(settings, "place_initial_samples", 50)
+
+        r = StubResolver()
+        with place_patches.preview_budget():
+            place_patches.track_for(FakeFrameMeta(n=100), "en", 500, resolver=r)
+        assert r.calls <= 3
+
+    def test_render_uses_the_full_budget(self, monkeypatch):
+        from gpstitch.config import settings
+        from gpstitch.patches import place_patches
+
+        monkeypatch.setattr(settings, "place_preview_max_lookups", 3)
+        monkeypatch.setattr(settings, "place_initial_samples", 11)
+        monkeypatch.setattr(settings, "place_max_lookups", 400)
+
+        r = StubResolver()
+        place_patches.track_for(FakeFrameMeta(n=100), "en", 500, resolver=r)
+        assert r.calls == 11
+
+    def test_budget_is_restored_after_the_block(self):
+        from gpstitch.patches import place_patches
+
+        with place_patches.preview_budget():
+            assert place_patches._preview_active() is True
+        assert place_patches._preview_active() is False
+
+    def test_preview_flag_does_not_leak_across_threads(self):
+        """Preview runs on an executor while a render may be in flight."""
+        import threading
+
+        from gpstitch.patches import place_patches
+
+        seen = {}
+
+        def worker():
+            seen["other_thread"] = place_patches._preview_active()
+
+        with place_patches.preview_budget():
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+        assert seen["other_thread"] is False
