@@ -23,6 +23,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from gpstitch.fonts import GOPRO_DEFAULT_FONT, find_available_font
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -107,6 +109,24 @@ def _extract_custom_args() -> dict:
     return result
 
 
+def _maybe_inject_font(argv: list[str], finder=find_available_font) -> list[str]:
+    """Return argv with --font appended when the caller did not choose one.
+
+    gopro-dashboard.py defaults --font to "Roboto-Medium.ttf", which Linux
+    distributions package but macOS and Windows do not ship, so the bare CLI
+    fails where the UI - which passes --font itself - succeeds. An explicit
+    --font from the caller always wins.
+    """
+    if any(arg == "--font" or arg.startswith("--font=") for arg in argv):
+        return argv
+
+    font = finder()
+    if not font or font == GOPRO_DEFAULT_FONT:
+        return argv
+
+    return [*argv, "--font", font]
+
+
 def main():
     """Main entry point for the gopro-dashboard wrapper."""
     # Apply patches BEFORE importing anything from gopro_overlay
@@ -118,6 +138,13 @@ def main():
 
     # Extract custom args before passing argv to gopro-dashboard.py
     custom_args = _extract_custom_args()
+
+    # Fall back to an installed font when the caller did not pick one,
+    # matching what renderer.generate_cli_command() does for the UI.
+    argv_before = len(sys.argv)
+    sys.argv = _maybe_inject_font(sys.argv)
+    if len(sys.argv) != argv_before:
+        logger.info("No --font given; using detected font: %s", sys.argv[-1])
 
     # Patch GPX loading to use SRT directly (preserves camera metrics)
     if custom_args["srt_path"]:
