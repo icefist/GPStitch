@@ -12,9 +12,15 @@ import csv
 import gzip
 import logging
 import math
+import sqlite3
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+import requests
+
+from gpstitch.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -174,3 +180,96 @@ class CitiesBackend:
             state=self._admin1.get(f"{cc}.{a1}") or None,
             country=self._countries.get(cc) or None,
         )
+
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
+
+# zoom=14 returns settlement-level detail and no "road" key, so street names are
+# excluded structurally rather than by filtering the response.
+NOMINATIM_ZOOM = 14
+
+# Nominatim address keys mapped onto PlaceName fields. "hamlet" is deliberately
+# absent, as are road, house_number and suburb.
+_ADDRESS_KEYS = ("village", "town", "city", "municipality", "county", "state", "country")
+
+
+class PlaceLookupError(Exception):
+    """A backend could not answer. Callers fall back rather than fail the render."""
+
+
+class RateLimiter:
+    """Cross-process request pacing.
+
+    An in-process limiter is not enough: the web app and the render subprocess
+    are separate processes, and two 1 req/s limiters together produce 2 req/s.
+    SQLite's BEGIN IMMEDIATE gives an atomic check-and-set across processes and
+    works on every platform, unlike fcntl locks.
+    """
+
+    def __init__(self, db_path: Path, min_interval_s: float):
+        self.db_path = Path(db_path)
+        self.min_interval_s = min_interval_s
+
+    def wait(self) -> float:
+        """Reserve the next slot, sleeping if necessary. Returns seconds slept."""
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            con = sqlite3.connect(str(self.db_path), timeout=10.0, isolation_level=None)
+            try:
+                con.execute("CREATE TABLE IF NOT EXISTS ratelimit (id INTEGER PRIMARY KEY, next_at REAL)")
+                con.execute("BEGIN IMMEDIATE")
+                row = con.execute("SELECT next_at FROM ratelimit WHERE id = 1").fetchone()
+                now = time.time()
+                slot = max(now, row[0] if row else 0.0)
+                con.execute(
+                    "INSERT OR REPLACE INTO ratelimit (id, next_at) VALUES (1, ?)",
+                    (slot + self.min_interval_s,),
+                )
+                con.execute("COMMIT")
+            finally:
+                con.close()
+        except sqlite3.Error as e:
+            # Never let bookkeeping break a lookup; pace conservatively instead.
+            logger.debug("Rate limiter unavailable (%s); using local delay", e)
+            time.sleep(self.min_interval_s)
+            return self.min_interval_s
+
+        delay = max(0.0, slot - now)
+        if delay:
+            time.sleep(delay)
+        return delay
+
+
+class NominatimBackend:
+    """Online reverse geocoding via OpenStreetMap's Nominatim.
+
+    Data (c) OpenStreetMap contributors, ODbL 1.0.
+    """
+
+    def __init__(self, session=None, limiter: RateLimiter | None = None):
+        self._session = session if session is not None else requests.Session()
+        self._limiter = limiter
+
+    def resolve(self, lat: float, lon: float, lang: str) -> PlaceName | None:
+        if self._limiter is not None:
+            self._limiter.wait()
+        try:
+            response = self._session.get(
+                NOMINATIM_URL,
+                params={
+                    "lat": lat,
+                    "lon": lon,
+                    "format": "jsonv2",
+                    "zoom": NOMINATIM_ZOOM,
+                    "accept-language": lang,
+                },
+                headers={"User-Agent": settings.place_user_agent},
+                timeout=settings.place_request_timeout_s,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as e:  # noqa: BLE001 - any failure means "fall back"
+            raise PlaceLookupError(f"Nominatim lookup failed: {e}") from e
+
+        address = payload.get("address") or {}
+        return PlaceName(**{k: address.get(k) for k in _ADDRESS_KEYS})
