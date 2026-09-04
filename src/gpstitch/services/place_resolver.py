@@ -7,8 +7,16 @@ nearest settlement). Results are cached on disk so repeat renders cost nothing.
 Place data (c) OpenStreetMap contributors (ODbL 1.0) and GeoNames (CC-BY 4.0).
 """
 
+import bisect
+import csv
+import gzip
+import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class Backend(str, Enum):
@@ -50,3 +58,119 @@ class PlaceName:
             if value:
                 return value
         return ""
+
+
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# Population thresholds sorting a settlement into a hierarchy slot. GeoNames has
+# no village/town/city distinction, so this is a heuristic - the exact cut points
+# matter little, since the feature targets coarse accuracy.
+_VILLAGE_MAX_POP = 10_000
+_TOWN_MAX_POP = 100_000
+
+# Latitude half-window scanned around a query. 0.5 deg is ~55km, wider than any
+# gap between settlements at cities500 density, and keeps the scan to roughly
+# 1,500 of 235,000 rows.
+_BAND_DEGREES = 0.5
+
+# Beyond this, treat the result as "nowhere near a settlement".
+_MAX_MATCH_KM = 75.0
+
+
+def _read_kv(path: Path, gz: bool) -> dict[str, str]:
+    """Read a two-column key/name TSV into a dict. A missing file yields {}."""
+    if not path.exists():
+        return {}
+    opener = gzip.open if gz else open
+    out: dict[str, str] = {}
+    with opener(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                out[parts[0]] = parts[1]
+    return out
+
+
+class CitiesBackend:
+    """Offline nearest-settlement lookup over the bundled GeoNames dataset.
+
+    Pure Python: a latitude-sorted list plus a band prefilter answers a lookup in
+    about 0.1 ms over 235k rows, so numpy and scipy are unnecessary.
+    """
+
+    def __init__(self, data_dir: Path | None = None):
+        self._dir = Path(data_dir) if data_dir is not None else _DATA_DIR
+        self._rows: list[tuple[float, float, str, int, str, str, str]] | None = None
+        self._lats: list[float] = []
+        self._admin1: dict[str, str] = {}
+        self._admin2: dict[str, str] = {}
+        self._countries: dict[str, str] = {}
+
+    def _ensure_loaded(self) -> None:
+        """Load on first use only, so unrelated renders pay nothing."""
+        if self._rows is not None:
+            return
+        self._rows = []
+        cities = self._dir / "cities.tsv.gz"
+        if not cities.exists():
+            logger.warning("Offline place dataset missing at %s; offline lookups disabled", cities)
+            return
+        rows = []
+        with gzip.open(cities, "rt", encoding="utf-8", newline="") as f:
+            for c in csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\"):
+                if len(c) < 7:
+                    continue
+                try:
+                    lat, lon, pop = float(c[1]), float(c[2]), int(c[3] or 0)
+                except ValueError:
+                    continue
+                rows.append((lat, lon, c[0], pop, c[4], c[5], c[6]))
+        rows.sort(key=lambda r: r[0])
+        self._rows = rows
+        self._lats = [r[0] for r in rows]
+        self._admin1 = _read_kv(self._dir / "admin1.tsv", gz=False)
+        self._admin2 = _read_kv(self._dir / "admin2.tsv.gz", gz=True)
+        self._countries = _read_kv(self._dir / "countries.tsv", gz=False)
+        logger.debug("Loaded %d settlements from %s", len(rows), cities)
+
+    def resolve(self, lat: float, lon: float, lang: str) -> PlaceName | None:
+        """Nearest settlement, or None if nothing is plausibly close.
+
+        `lang` is accepted for interface symmetry but ignored: GeoNames ships
+        names, not translations.
+        """
+        self._ensure_loaded()
+        if not self._rows:
+            return None
+
+        lo = bisect.bisect_left(self._lats, lat - _BAND_DEGREES)
+        hi = bisect.bisect_right(self._lats, lat + _BAND_DEGREES)
+        coslat = math.cos(math.radians(lat))
+
+        best_sq = float("inf")
+        best = None
+        for i in range(lo, hi):
+            row = self._rows[i]
+            dy = row[0] - lat
+            dx = (row[1] - lon) * coslat
+            d_sq = dy * dy + dx * dx
+            if d_sq < best_sq:
+                best_sq, best = d_sq, row
+
+        if best is None or math.sqrt(best_sq) * 111.0 > _MAX_MATCH_KM:
+            return None
+
+        _, _, name, pop, cc, a1, a2 = best
+        if pop < _VILLAGE_MAX_POP:
+            slot = "village"
+        elif pop < _TOWN_MAX_POP:
+            slot = "town"
+        else:
+            slot = "city"
+
+        return PlaceName(
+            **{slot: name},
+            county=self._admin2.get(f"{cc}.{a1}.{a2}") or None,
+            state=self._admin1.get(f"{cc}.{a1}") or None,
+            country=self._countries.get(cc) or None,
+        )
