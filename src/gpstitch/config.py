@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     # Defaults to ~/.gopro-graphics — the same location gopro-dashboard.py reads from.
     gopro_config_dir: Path = Path.home() / ".gopro-graphics"
 
+    # Place name overlay (reverse geocoding)
+    # Nominatim's usage policy requires an identifying User-Agent and max 1 req/s.
+    place_user_agent: str = "GPStitch (+https://github.com/Romancha/GPStitch)"
+    place_min_interval_s: float = 1.0
+    place_request_timeout_s: float = 5.0
+    place_enable_network: bool = True
+    # Progressive refinement: start coarse, bisect only where names differ.
+    place_initial_samples: int = 11
+    place_target_metres: int = 500
+    place_max_lookups: int = 400  # cap an all-different track
+    place_preview_max_lookups: int = 25  # preview blocks, so keep its budget small
+
     # Allowed file extensions
     allowed_extensions: set[str] = {".mp4", ".mov", ".gpx", ".fit", ".srt"}
 
