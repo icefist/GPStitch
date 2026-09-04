@@ -110,9 +110,14 @@ reintroduces a specific, identified bug.
   against a mixed-backend track invents phantom boundaries, because the two
   backends word results differently (C7). When the backend changes mid-run, stop
   refining rather than compare across sources.
-- **C4 — Do not memoise on `framemeta` identity alone.** Preview rebuilds framemeta
-  every time (`renderer.py:1303`, `:1315`), so identity-only keys always miss, and
-  two `place` widgets with different `lang` would collide.
+- **C4 — Memoise on the framemeta object via `weakref`, never on `id()`.** Preview
+  rebuilds framemeta every time (`renderer.py:1303`, `:1315`) and discards the old
+  one, so CPython reuses the address — measured: three sequentially freed
+  `FrameMeta` objects produced ids `[...736, ...736, ...376]`. An `id()` key would
+  serve the previous video's place names. Use a `WeakKeyDictionary` keyed on the
+  object, holding a per-`(lang, target_m)` inner dict so two `place` widgets with
+  different languages cannot collide. It also evicts automatically, which an
+  `id()`-keyed dict never would.
 - **C5 — Load the cities dataset lazily.** Only when a layout contains a `place`
   widget, so unrelated `gpstitch-dashboard` runs pay nothing.
 - **C6 — The value callable returns `str`, never `None`.** `CachingText` raises

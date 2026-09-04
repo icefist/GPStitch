@@ -17,7 +17,7 @@ Every task's requirements implicitly include these. They are copied verbatim fro
 - **C1** Rate limiting must be cross-process (preview and render are separate processes; two in-process limiters give 2 req/s against a 1 req/s cap).
 - **C2** Never attach place names to `Entry`. `Entry.interpolate` computes `end - start` for every key and catches only `KeyError`; a string raises `TypeError`, and `FrameMeta.get` interpolates on nearly every frame.
 - **C3** Only compare samples produced by the same backend. Mixed-backend comparison invents phantom boundaries.
-- **C4** Never memoise on `framemeta` identity alone — preview rebuilds framemeta every call (`renderer.py:1303`, `:1315`). Key on `(id(framemeta), lang, target_m)`.
+- **C4** Memoise via `weakref.WeakKeyDictionary` keyed on the framemeta object, never on `id()`. Preview rebuilds and discards framemeta constantly, and CPython reuses freed addresses — an `id()` key eventually serves the previous video's names.
 - **C5** Load the cities dataset lazily, only when a layout contains a `place` widget.
 - **C6** The widget value callable returns `str`, never `None`. `CachingText` raises `ValueError` on `None`. Terminal case is `""`.
 - **C7** Offline gives village → county → state → country. `municipality` is online-only.
@@ -1571,12 +1571,12 @@ class TestCreatePlace:
 
     def test_widget_renders_the_resolved_name(self):
         from gopro_overlay import layout_xml
-        from gopro_overlay.font import load_font
+        from PIL import ImageFont
 
         patch_place_widget()
         fm = FakeFrameMeta()
         factory = layout_xml.Widgets(
-            font=lambda size: load_font("/System/Library/Fonts/Helvetica.ttc", size),
+            font=lambda size: ImageFont.load_default(),
             privacy=None, renderer=None, framemeta=fm, converters=None,
         )
         element = ET.fromstring('<component type="place" x="10" y="20" size="24" lang="en"/>')
@@ -1588,11 +1588,11 @@ class TestCreatePlace:
     def test_widget_returns_empty_string_when_entry_is_none(self):
         """C6: entry() is None before the first draw; CachingText raises on None."""
         from gopro_overlay import layout_xml
-        from gopro_overlay.font import load_font
+        from PIL import ImageFont
 
         patch_place_widget()
         factory = layout_xml.Widgets(
-            font=lambda size: load_font("/System/Library/Fonts/Helvetica.ttc", size),
+            font=lambda size: ImageFont.load_default(),
             privacy=None, renderer=None, framemeta=FakeFrameMeta(), converters=None,
         )
         element = ET.fromstring('<component type="place"/>')
@@ -1618,13 +1618,17 @@ happens after the data is loaded and where `self.framemeta` is available.
 """
 
 import logging
+import weakref
 
 logger = logging.getLogger(__name__)
 
-# Memoised tracks. Keyed on (id(framemeta), lang, target_m) because preview
-# rebuilds framemeta on every call, so identity alone always misses (C4), and
-# two place widgets may request different languages.
-_TRACKS: dict[tuple[int, str, int], object] = {}
+# Memoised tracks, keyed on the framemeta OBJECT via weakref (C4).
+#
+# id(framemeta) would be wrong: preview rebuilds and discards framemeta on every
+# request, and CPython reuses freed addresses, so an id() key eventually returns
+# the previous video's track. A WeakKeyDictionary keys on identity safely and
+# evicts entries when the framemeta is collected.
+_TRACKS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 def track_for(framemeta, lang: str, target_m: int, resolver=None, max_lookups: int | None = None):
@@ -1633,8 +1637,13 @@ def track_for(framemeta, lang: str, target_m: int, resolver=None, max_lookups: i
     from gpstitch.services.place_resolver import PlaceResolver
     from gpstitch.services.place_track import build_place_track
 
-    key = (id(framemeta), lang, target_m)
-    cached = _TRACKS.get(key)
+    per_framemeta = _TRACKS.get(framemeta)
+    if per_framemeta is None:
+        per_framemeta = {}
+        _TRACKS[framemeta] = per_framemeta
+
+    key = (lang, target_m)
+    cached = per_framemeta.get(key)
     if cached is not None:
         return cached
 
@@ -1646,7 +1655,7 @@ def track_for(framemeta, lang: str, target_m: int, resolver=None, max_lookups: i
         settings.place_initial_samples,
         settings.place_max_lookups if max_lookups is None else max_lookups,
     )
-    _TRACKS[key] = track
+    per_framemeta[key] = track
     return track
 
 
