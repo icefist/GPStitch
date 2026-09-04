@@ -29,6 +29,7 @@ on the implementation.
 | D7 | Progressive refinement, coarse to fine | Anytime coverage; a failure leaves a complete coarser track |
 | D8 | Refine only intervals whose endpoints disagree | ~39 calls instead of ~100, and transitions land more precisely |
 | D9 | Offline dataset is GeoNames `cities500`, pre-trimmed | Only floor low enough to contain villages (D4) |
+| D11 | Bundle admin1 **and** admin2 code tables | Disk is a non-constraint next to the footage; narrows C7 |
 | D10 | Target resolution 500 m | User confirmed well within acceptable accuracy |
 
 ## Architecture
@@ -118,9 +119,10 @@ reintroduces a specific, identified bug.
   `ValueError` on `None`. Terminal case is `""`. Applies to: `entry()` being `None`
   before the first draw, `entry().point` being `None` (no GPS fix), open ocean with
   no country, and total resolution failure.
-- **C7 — Offline cannot produce the full chain.** GeoNames stores `admin1`/`admin2`
-  as codes, not names. Bundling `admin1CodesASCII.txt` (0.1 MB) gives
-  village → state → country. Municipality and county are online-only.
+- **C7 — Offline chain is one level short.** GeoNames stores `admin1`/`admin2` as
+  codes, not names. Bundling `admin1CodesASCII.txt` (0.1 MB) and `admin2Codes.txt`
+  (~2 MB) gives village → county → state → country. Only `municipality` remains
+  online-only, since GeoNames has no equivalent level.
 - **C8 — Cache writes must never fail a render.** `SqliteDict(autocommit=True)`
   can raise "database is locked" under multi-process contention. Wrap and log.
 - **C9 — `codo` is a pint `Quantity` and may be `None`.** Use unit-aware arithmetic
@@ -187,6 +189,7 @@ scipy, and a C extension built at install time.
 | `src/gpstitch/patches/place_patches.py` | `create_place` on `Widgets` |
 | `src/gpstitch/data/cities500.tsv.gz` | Trimmed GeoNames dataset (~2.3 MB) |
 | `src/gpstitch/data/admin1.tsv` | Admin-1 code → name (~0.1 MB) |
+| `src/gpstitch/data/admin2.tsv` | Admin-2 code → name (~2 MB), gives offline county level |
 | `scripts/build_places_dataset.py` | Regenerates the trimmed data; records source and date |
 | `tests/unit/services/test_place_resolver.py` | |
 | `tests/unit/services/test_place_track.py` | |
