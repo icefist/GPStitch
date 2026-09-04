@@ -12,6 +12,7 @@ import csv
 import gzip
 import logging
 import math
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 
 import requests
+from sqlitedict import SqliteDict
 
 from gpstitch.config import settings
 
@@ -273,3 +275,96 @@ class NominatimBackend:
 
         address = payload.get("address") or {}
         return PlaceName(**{k: address.get(k) for k in _ADDRESS_KEYS})
+
+
+# ~110m buckets: a stationary rider or slow hiker reuses one cache entry.
+_CACHE_PRECISION = 3
+
+
+class PlaceResolver:
+    """Cached reverse geocoding with online-first, offline-fallback behaviour."""
+
+    def __init__(
+        self,
+        online: NominatimBackend | None = None,
+        offline: CitiesBackend | None = None,
+        cache_path: Path | None = None,
+        enable_network: bool | None = None,
+    ):
+        cache_dir = settings.gopro_config_dir
+        self._online = (
+            online
+            if online is not None
+            else NominatimBackend(
+                limiter=RateLimiter(cache_dir / "placeratelimit.sqlite", settings.place_min_interval_s)
+            )
+        )
+        self._offline = offline if offline is not None else CitiesBackend()
+        self._cache_path = Path(cache_path) if cache_path is not None else cache_dir / "placecache.sqlite"
+        self._enable_network = settings.place_enable_network if enable_network is None else enable_network
+        self._cache_ok: bool | None = None
+
+    def _key(self, lat: float, lon: float, lang: str) -> str:
+        return f"{round(lat, _CACHE_PRECISION)},{round(lon, _CACHE_PRECISION)},{lang}"
+
+    def _cache_usable(self) -> bool:
+        """Probe the cache path once, then remember the answer.
+
+        SqliteDict opens its connection on a worker thread, so an unwritable
+        path raises there rather than here - which pytest reports as an
+        unhandled thread exception, and which would otherwise repeat for every
+        lookup of a 400-lookup render. Probing once turns a broken cache into a
+        quiet, cheap no-op.
+        """
+        if self._cache_ok is None:
+            try:
+                self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self._cache_ok = os.access(self._cache_path.parent, os.W_OK)
+            except OSError:
+                self._cache_ok = False
+            if not self._cache_ok:
+                logger.info("Place cache unusable at %s; continuing without it", self._cache_path)
+        return self._cache_ok
+
+    def _cache_get(self, key: str):
+        if not self._cache_usable():
+            return None
+        try:
+            with SqliteDict(filename=str(self._cache_path), autocommit=True) as db:
+                return db.get(key)
+        except Exception as e:  # noqa: BLE001 - cache problems are never fatal
+            logger.debug("Place cache read failed (%s)", e)
+            return None
+
+    def _cache_put(self, key: str, value) -> None:
+        if not self._cache_usable():
+            return
+        try:
+            with SqliteDict(filename=str(self._cache_path), autocommit=True) as db:
+                db[key] = value
+        except Exception as e:  # noqa: BLE001 - a cache write must never fail a render
+            logger.debug("Place cache write failed (%s)", e)
+
+    def resolve(self, lat: float, lon: float, lang: str) -> tuple[PlaceName | None, Backend]:
+        """Resolve a position, reporting which backend answered.
+
+        The backend is part of the return value because refinement must never
+        compare names that came from different sources.
+        """
+        key = self._key(lat, lon, lang)
+        cached = self._cache_get(key)
+        if cached is not None:
+            place, backend = cached
+            return place, Backend(backend)
+
+        if self._enable_network:
+            try:
+                place = self._online.resolve(lat, lon, lang)
+                self._cache_put(key, (place, Backend.NOMINATIM.value))
+                return place, Backend.NOMINATIM
+            except PlaceLookupError as e:
+                logger.info("Falling back to offline place data: %s", e)
+
+        place = self._offline.resolve(lat, lon, lang)
+        self._cache_put(key, (place, Backend.CITIES.value))
+        return place, Backend.CITIES
