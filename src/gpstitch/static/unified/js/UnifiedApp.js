@@ -291,11 +291,14 @@ class UnifiedApp {
      */
     _initOutputFolder() {
         const render = () => {
+            const folder = window.OutputFolder.get();
             if (this.outputFolderValue) {
                 this.outputFolderValue.textContent = window.OutputFolder.label();
+                // Left-clipping suits a path but mangles the default label.
+                this.outputFolderValue.classList.toggle('is-path', Boolean(folder));
             }
             if (this.outputFolderClear) {
-                this.outputFolderClear.hidden = !window.OutputFolder.get();
+                this.outputFolderClear.hidden = !folder;
             }
         };
 

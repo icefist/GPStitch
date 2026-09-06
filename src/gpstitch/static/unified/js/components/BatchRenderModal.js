@@ -340,6 +340,10 @@ class BatchRenderModal {
     _renderOutputFolder() {
         if (this.outputFolderValue && window.OutputFolder) {
             this.outputFolderValue.textContent = window.OutputFolder.label();
+            this.outputFolderValue.classList.toggle(
+                'is-path',
+                Boolean(window.OutputFolder.get())
+            );
         }
     }
 

@@ -3208,10 +3208,20 @@ select {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    direction: rtl;
-    text-align: left;
     font-size: var(--font-size-sm);
     color: var(--color-text-secondary);
+}
+
+/* A path's tail identifies it, so long paths clip at the start. Applied only
+   when a path is shown: it would mangle the plain-language default label. */
+.output-folder-value.is-path {
+    direction: rtl;
+    text-align: left;
+}
+
+/* .btn sets display, which otherwise beats [hidden] on specificity. */
+.btn[hidden] {
+    display: none;
 }
 
 /* Keep the Add Videos button on the same line as the File Paths label. */

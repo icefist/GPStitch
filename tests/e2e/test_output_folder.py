@@ -222,3 +222,30 @@ class TestDuplicateOutputWarning:
 
         assert "DJI_0001_overlay.mp4" in seen.get("text", ""), seen
         assert started["called"] is False, "batch started despite a collision"
+
+
+@pytest.mark.e2e
+class TestOutputFolderAppearance:
+    """Text assertions cannot see these: textContent is complete either way."""
+
+    def test_default_label_is_not_truncated_from_the_left(self, app_page: Page):
+        """RTL truncation suits long paths, but mangles 'Alongside source video'."""
+        direction = app_page.locator("#output-folder-value").evaluate("el => getComputedStyle(el).direction")
+        assert direction == "ltr"
+
+    def test_a_chosen_path_truncates_from_the_left(self, app_page: Page):
+        """A path's tail is the useful part, so long paths clip at the start."""
+        _stub_browse(app_page, ["/Users/me/Movies/2026/Exports"])
+        app_page.locator("#output-folder-btn").click()
+        expect(app_page.locator("#output-folder-value")).to_contain_text("Exports")
+
+        direction = app_page.locator("#output-folder-value").evaluate("el => getComputedStyle(el).direction")
+        assert direction == "rtl"
+
+    def test_reset_is_hidden_until_a_folder_is_chosen(self, app_page: Page):
+        expect(app_page.locator("#output-folder-clear")).to_be_hidden()
+
+    def test_reset_appears_once_a_folder_is_chosen(self, app_page: Page):
+        _stub_browse(app_page, ["/Users/me/Exports"])
+        app_page.locator("#output-folder-btn").click()
+        expect(app_page.locator("#output-folder-clear")).to_be_visible()
