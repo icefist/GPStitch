@@ -77,3 +77,21 @@ class TestBrowseButton:
         app_page.locator("#video-browse-btn").click()
         app_page.wait_for_timeout(500)
         assert loaded.get("path") == "/Users/me/clip.mp4"
+
+
+@pytest.mark.e2e
+class TestBrowseLayout:
+    """A third control in a narrow sidebar must not squeeze the path unreadable."""
+
+    def test_path_input_sits_on_its_own_line_above_the_buttons(self, app_page: Page):
+        input_box = app_page.locator("#video-path-input").bounding_box()
+        button_box = app_page.locator("#video-browse-btn").bounding_box()
+        # Same row would mean overlapping vertical extents.
+        assert input_box["y"] + input_box["height"] <= button_box["y"] + 1, (
+            f"input at y={input_box['y']}..{input_box['y'] + input_box['height']}, button at y={button_box['y']}"
+        )
+
+    def test_path_input_spans_the_panel_width(self, app_page: Page):
+        input_box = app_page.locator("#video-path-input").bounding_box()
+        row_box = app_page.locator("#video-field .file-field-input-row").bounding_box()
+        assert input_box["width"] >= row_box["width"] * 0.9

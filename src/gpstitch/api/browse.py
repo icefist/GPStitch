@@ -63,6 +63,8 @@ async def browse(request: BrowseRequest) -> BrowseResponse:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001 - surface any dialog failure as a 500
         logger.exception("File dialog failed")
-        raise HTTPException(status_code=500, detail=f"File dialog failed: {e}") from e
+        # The detail is shown to the user verbatim, so pass the underlying
+        # reason through rather than prefixing text it may already contain.
+        raise HTTPException(status_code=500, detail=str(e) or "File dialog failed") from e
 
     return BrowseResponse(path=path)

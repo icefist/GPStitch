@@ -55,6 +55,21 @@ class TestBrowseEndpoint:
             response = await async_client.post("/api/browse", json={"kind": "video"})
         assert response.status_code == 500
 
+    async def test_failure_detail_is_not_doubled(self, async_client):
+        """The detail reaches the user in an alert, so it must read cleanly."""
+        with patch(
+            "gpstitch.api.browse.choose_file",
+            AsyncMock(side_effect=RuntimeError("File dialog failed")),
+        ):
+            response = await async_client.post("/api/browse", json={"kind": "video"})
+        detail = response.json()["detail"]
+        assert detail.lower().count("file dialog failed") == 1, detail
+
+    async def test_failure_detail_keeps_the_underlying_reason(self, async_client):
+        with patch("gpstitch.api.browse.choose_file", AsyncMock(side_effect=RuntimeError("zenity missing"))):
+            response = await async_client.post("/api/browse", json={"kind": "video"})
+        assert "zenity missing" in response.json()["detail"]
+
     async def test_availability_is_reported_for_this_platform(self, async_client):
         """The UI hides the Browse button where no picker exists."""
         response = await async_client.get("/api/browse/available")

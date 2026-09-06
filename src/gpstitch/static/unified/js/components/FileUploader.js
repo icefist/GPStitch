@@ -64,7 +64,7 @@ class FileUploader {
                     <div class="file-field-input-row">
                         <input type="text" id="video-path-input" class="file-path-input" placeholder="/path/to/video.mp4">
                         ${this.browseAvailable ? `
-                            <button id="video-browse-btn" class="btn btn-sm btn-secondary" title="Browse for a video">Browse…</button>
+                            <button id="video-browse-btn" class="btn btn-sm btn-secondary file-browse-btn" title="Browse for a video">Browse…</button>
                         ` : ''}
                         <button id="video-load-btn" class="btn btn-sm btn-primary">Load</button>
                     </div>
@@ -90,7 +90,7 @@ class FileUploader {
                     <div class="file-field-input-row">
                         <input type="text" id="gps-path-input" class="file-path-input" placeholder="/path/to/track.gpx or .srt">
                         ${this.browseAvailable ? `
-                            <button id="gps-browse-btn" class="btn btn-sm btn-secondary" title="Browse for GPS data">Browse…</button>
+                            <button id="gps-browse-btn" class="btn btn-sm btn-secondary file-browse-btn" title="Browse for GPS data">Browse…</button>
                         ` : ''}
                         <button id="gps-load-btn" class="btn btn-sm btn-primary">Load</button>
                     </div>

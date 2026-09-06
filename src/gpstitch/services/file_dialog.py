@@ -96,20 +96,20 @@ def parse_result(platform: str, returncode: int, stdout: str, stderr: str) -> st
         # AppleScript spells it "canceled"; -128 is the user-cancelled code.
         if "user canceled" in stderr.lower() or "-128" in stderr:
             return None
-        raise RuntimeError(stderr.strip() or "File dialog failed")
+        raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
 
     if platform.startswith("linux"):
         # zenity exits 1 on dismiss, with nothing on stdout.
         if returncode != 0:
             if path:
-                raise RuntimeError(stderr.strip() or "File dialog failed")
+                raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
             return None
         return path or None
 
     if platform.startswith("win"):
         # PowerShell exits 0 either way; an empty result means dismissed.
         if returncode != 0:
-            raise RuntimeError(stderr.strip() or "File dialog failed")
+            raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
         return path or None
 
     raise FileDialogUnavailable(f"No native file dialog for platform {platform!r}")
