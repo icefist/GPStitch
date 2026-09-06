@@ -1058,7 +1058,64 @@ def _thin_timeseries(timeseries, target_hz: int):
     return new_ts
 
 
-def _load_dji_meta_for_preview(file_path: Path, units):
+# Seconds of GPS pulled around the previewed frame. Wide enough for speed and
+# heading to be computed from neighbours, narrow enough to stay near-instant.
+DJI_PREVIEW_WINDOW_S = 6.0
+
+
+def _sample_dji_meta_for_frame(
+    file_path: Path,
+    *,
+    at_seconds: float,
+    total_duration_s: float | None,
+    detect,
+    window,
+    coarse,
+) -> list:
+    """GPS points good enough to draw one preview frame.
+
+    Reading the whole stream means seeking through the entire file (~390s for a
+    12GB clip). A preview needs accurate values only at the frame being drawn,
+    so this takes a dense window there, plus a coarse sample across the clip so
+    the journey map and odometer still look right. Around 5s instead of 390s,
+    at the cost of an approximate route and distance - which a preview can bear.
+    """
+    stream_idx = detect(file_path)
+    if stream_idx is None:
+        return []
+
+    points = []
+    if total_duration_s and total_duration_s > 0:
+        points.extend(
+            coarse(
+                file_path,
+                total_duration_s=total_duration_s,
+                stream_index=stream_idx,
+            )
+        )
+
+    # Dense window around the frame, so the values shown there are real rather
+    # than interpolated across a gap in the coarse sample.
+    points.extend(
+        window(
+            file_path,
+            start_s=at_seconds - DJI_PREVIEW_WINDOW_S / 2,
+            duration_s=DJI_PREVIEW_WINDOW_S,
+            stream_index=stream_idx,
+        )
+    )
+
+    # Windows overlap at their edges; keep one point per timestamp, in order.
+    unique = {p.timestamp: p for p in points}
+    return [unique[t] for t in sorted(unique)]
+
+
+def _load_dji_meta_for_preview(
+    file_path: Path,
+    units,
+    at_seconds: float | None = None,
+    total_duration_s: float | None = None,
+):
     """Load GPS timeseries from embedded DJI meta stream for preview rendering.
 
     Detects DJI meta stream, extracts GPS points, thins to target Hz, and
@@ -1075,13 +1132,26 @@ def _load_dji_meta_for_preview(file_path: Path, units):
         ValueError: If no DJI meta stream or GPS data found
     """
     from gpstitch.services.dji_meta_parser import (
+        detect_dji_meta_stream,
         parse_dji_meta_file,
+        parse_dji_meta_window,
+        sample_dji_meta_track,
     )
     from gpstitch.services.srt_parser import calc_sample_rate
 
     target_hz = DEFAULT_GPS_TARGET_HZ
 
-    points = parse_dji_meta_file(file_path)
+    if at_seconds is None:
+        points = parse_dji_meta_file(file_path)
+    else:
+        points = _sample_dji_meta_for_frame(
+            file_path,
+            at_seconds=at_seconds,
+            total_duration_s=total_duration_s,
+            detect=detect_dji_meta_stream,
+            window=parse_dji_meta_window,
+            coarse=sample_dji_meta_track,
+        )
     if not points:
         raise ValueError(f"No valid GPS data found in DJI meta stream: {file_path}")
 
@@ -1113,16 +1183,19 @@ def _resolve_dji_meta_start_date(file_path: Path, ffmpeg_gopro, video_time_align
     if DJI meta parsing fails.
     """
     try:
-        from gpstitch.services.dji_meta_parser import parse_dji_meta_file
+        from gpstitch.services.dji_meta_parser import first_dji_meta_point
 
-        points = parse_dji_meta_file(file_path)
-        if points:
+        # Only the first point is needed, so read from the start of the stream
+        # rather than parsing all of it - the full parse seeks through the whole
+        # file, which costs minutes on a large clip.
+        first = first_dji_meta_point(file_path)
+        if first is not None:
             recording = ffmpeg_gopro.find_recording(file_path)
             duration = recording.video.duration
 
-            first_ts = points[0].timestamp
+            first_ts = first.timestamp
             # Account for GPS lock delay: subtract frame offset / fps
-            frame_idx = points[0].frame_idx
+            frame_idx = first.frame_idx
             if frame_idx > 0:
                 fps = recording.video.frame_rate()
                 if fps and fps > 0:
@@ -1199,6 +1272,7 @@ def _load_video_framemeta(
     time_offset_seconds: int,
     gps_dop_max: float,
     gps_speed_max: float,
+    preview_at_seconds: float | None = None,
 ):
     """Build the GPS framemeta for a video preview.
 
@@ -1246,9 +1320,14 @@ def _load_video_framemeta(
         from gpstitch.services.dji_meta_parser import detect_dji_meta_stream
 
         if detect_dji_meta_stream(file_path) is not None:
-            timeseries = _load_dji_meta_for_preview(file_path, units)
             start_date, duration = _resolve_dji_meta_start_date(
                 file_path, ffmpeg_gopro, video_time_alignment, time_offset_seconds
+            )
+            timeseries = _load_dji_meta_for_preview(
+                file_path,
+                units,
+                at_seconds=preview_at_seconds,
+                total_duration_s=(duration.millis() / 1000.0) if duration is not None else None,
             )
             start_date = _align_timezone(start_date, timeseries)
             return timeseries_to_framemeta(timeseries, units, start_date=start_date, duration=duration)
@@ -1361,6 +1440,7 @@ def render_preview(
                 time_offset_seconds,
                 gps_dop_max,
                 gps_speed_max,
+                preview_at_seconds=frame_time_ms / 1000.0,
             )
         else:
             # Load GPX, FIT, or SRT file
@@ -1562,6 +1642,7 @@ def _render_layout_with_data(
                 time_offset_seconds,
                 gps_dop_max,
                 gps_speed_max,
+                preview_at_seconds=frame_time_ms / 1000.0,
             )
         else:
             timeseries = _load_external_timeseries(file_path, units)
