@@ -23,6 +23,7 @@ from gpstitch.models.job import RenderJobConfig, migrate_video_time_alignment
 from gpstitch.models.schemas import FileRole
 from gpstitch.services.file_manager import file_manager
 from gpstitch.services.job_manager import job_manager
+from gpstitch.services.metadata import extract_video_metadata
 from gpstitch.services.render_service import render_service
 
 router = APIRouter()
@@ -617,6 +618,18 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
         session_id = file_manager.create_local_session(skip_cleanup=True)
 
         try:
+            # Extract metadata, as the single-file path does. Without it
+            # primary.video_metadata stays None, and every downstream
+            # getattr(..., "has_dji_meta", False) check quietly answers False -
+            # so a DJI clip's embedded GPS is never passed to the renderer and
+            # gopro-dashboard goes looking for GoPro GPMF that is not there.
+            video_metadata = None
+            if file_type == "video":
+                try:
+                    video_metadata = extract_video_metadata(video_path)
+                except Exception:
+                    logger.warning("Batch: could not read metadata from %s", video_path)
+
             # Add primary file
             file_manager.add_file(
                 session_id=session_id,
@@ -624,6 +637,7 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
                 file_path=str(video_path),
                 file_type=file_type,
                 role=FileRole.PRIMARY,
+                video_metadata=video_metadata,
             )
 
             # Add secondary GPX/FIT if provided (per-file takes priority over shared)
