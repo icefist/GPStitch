@@ -1782,7 +1782,7 @@ class TestGenerateCliCommandDjiMeta:
         monkeypatch.setattr(fm_module, "file_manager", manager)
         return manager
 
-    def _make_file_info(self, file_path, file_type, role, has_dji_meta=False, dji_meta_point_count=None):
+    def _make_file_info(self, file_path, file_type, role, has_dji_meta=False):
         from gpstitch.models.schemas import FileInfo, VideoMetadata
 
         video_metadata = None
@@ -1795,7 +1795,6 @@ class TestGenerateCliCommandDjiMeta:
                 frame_rate=25.0,
                 has_gps=False,
                 has_dji_meta=has_dji_meta,
-                dji_meta_point_count=dji_meta_point_count,
             )
 
         return FileInfo(
@@ -1819,7 +1818,6 @@ class TestGenerateCliCommandDjiMeta:
             "video",
             FileRole.PRIMARY,
             has_dji_meta=True,
-            dji_meta_point_count=125,
         )
 
         mock_file_manager.get_files.return_value = [primary]
@@ -1852,7 +1850,6 @@ class TestGenerateCliCommandDjiMeta:
             "video",
             FileRole.PRIMARY,
             has_dji_meta=True,
-            dji_meta_point_count=125,
         )
 
         mock_file_manager.get_files.return_value = [primary]
@@ -1881,7 +1878,6 @@ class TestGenerateCliCommandDjiMeta:
             "video",
             FileRole.PRIMARY,
             has_dji_meta=True,
-            dji_meta_point_count=125,
         )
 
         mock_file_manager.get_files.return_value = [primary]
@@ -1907,7 +1903,6 @@ class TestGenerateCliCommandDjiMeta:
             "video",
             FileRole.PRIMARY,
             has_dji_meta=True,
-            dji_meta_point_count=125,
         )
         secondary = self._make_file_info("/tmp/track.gpx", "gpx", FileRole.SECONDARY)
 

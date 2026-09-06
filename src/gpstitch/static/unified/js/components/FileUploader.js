@@ -265,6 +265,16 @@ class FileUploader {
         const path = this._cleanPath(input.value);
         if (!path) return;
 
+        // Reading a large clip off an external volume is real work and can take
+        // minutes, so say so - and disable the button, since a second click
+        // would queue another read of the same file.
+        const loadButton = document.getElementById(`${type}-load-btn`);
+        const loadButtonText = loadButton?.textContent;
+        if (loadButton) {
+            loadButton.disabled = true;
+            loadButton.textContent = 'Reading…';
+        }
+
         // Determine role based on current state and type
         const hasVideo = this.state.getPrimaryFile()?.file_type === 'video';
         const hasGps = this.state.getSecondaryFile() ||
@@ -337,6 +347,11 @@ class FileUploader {
         } catch (error) {
             console.error('Load failed:', error);
             alert(error.message);
+        } finally {
+            if (loadButton) {
+                loadButton.disabled = false;
+                loadButton.textContent = loadButtonText;
+            }
         }
     }
 

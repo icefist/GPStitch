@@ -70,17 +70,22 @@ def extract_video_metadata(file_path: Path) -> VideoMetadata | None:
         rotation = get_video_rotation(file_path)
         display_w, display_h = get_display_dimensions(video.dimension.x, video.dimension.y, rotation)
 
-        # Detect embedded DJI meta GPS stream
+        # Detect an embedded DJI meta GPS stream.
+        #
+        # Detection only reads the container headers, so it costs about 0.15s
+        # even on a multi-gigabyte file. Reading the stream's contents is a very
+        # different proposition: its samples are interleaved across the whole
+        # file, so counting the GPS points inside means seeking through all of
+        # it - measured at ~390s for a 12GB clip on an external volume.
+        #
+        # That work is deferred to preview and render, which already extract the
+        # stream themselves when GPS is actually needed, and which already raise
+        # a clear error if the stream turns out to hold no usable points.
         has_dji_meta = False
-        dji_meta_point_count = None
         try:
-            from gpstitch.services.dji_meta_parser import detect_dji_meta_stream, get_dji_meta_metadata
+            from gpstitch.services.dji_meta_parser import detect_dji_meta_stream
 
-            stream_idx = detect_dji_meta_stream(file_path)
-            if stream_idx is not None:
-                meta = get_dji_meta_metadata(file_path, stream_index=stream_idx)
-                dji_meta_point_count = meta.get("gps_point_count", 0)
-                has_dji_meta = dji_meta_point_count > 0
+            has_dji_meta = detect_dji_meta_stream(file_path) is not None
         except Exception:
             logger.debug("DJI meta detection skipped for %s", file_path)
 
@@ -92,7 +97,6 @@ def extract_video_metadata(file_path: Path) -> VideoMetadata | None:
             frame_rate=video.frame_rate(),
             has_gps=has_gps,
             has_dji_meta=has_dji_meta,
-            dji_meta_point_count=dji_meta_point_count,
         )
     except Exception:
         logger.exception("Error extracting video metadata from %s", file_path)
