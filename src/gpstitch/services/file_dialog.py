@@ -36,6 +36,12 @@ class FileDialogBusy(Exception):
     """A picker is already open."""
 
 
+FOLDER_KIND = "folder"
+
+# zenity --multiple joins its results with this rather than newlines.
+ZENITY_SEPARATOR = "|"
+
+
 def _extensions_for(kind: str) -> tuple[str, ...]:
     try:
         return KIND_EXTENSIONS[kind]
@@ -43,30 +49,91 @@ def _extensions_for(kind: str) -> tuple[str, ...]:
         raise ValueError(f"Unknown file kind: {kind!r}") from None
 
 
-def build_command(platform: str, kind: str) -> list[str]:
+def _label_for(kind: str) -> str:
+    if kind == FOLDER_KIND:
+        return "output folder"
+    return "Video" if kind == "video" else "GPS data"
+
+
+def _folder_command(platform: str) -> list[str]:
+    label = _label_for(FOLDER_KIND)
+    if platform == "darwin":
+        return [
+            "osascript",
+            "-e",
+            'tell application "System Events" to activate',
+            "-e",
+            f'POSIX path of (choose folder with prompt "Choose {label}")',
+        ]
+    if platform.startswith("linux"):
+        return ["zenity", "--file-selection", "--directory", f"--title=Choose {label}"]
+    if platform.startswith("win"):
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$d.Description = 'Choose {label}'; "
+            "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"
+        )
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+    raise FileDialogUnavailable(f"No native file dialog for platform {platform!r}")
+
+
+def build_command(platform: str, kind: str, multiple: bool = False) -> list[str]:
     """Build the native picker command for `platform`."""
+    if kind == FOLDER_KIND:
+        if multiple:
+            # The three platforms disagree on multi-folder selection and nothing
+            # here needs it; refuse rather than guess.
+            raise ValueError("Multiple selection is not supported for folders")
+        return _folder_command(platform)
+
     extensions = _extensions_for(kind)
-    label = "Video" if kind == "video" else "GPS data"
+    label = _label_for(kind)
 
     if platform == "darwin":
         of_type = ", ".join(f'"{e}"' for e in extensions)
+        # Without the activate the panel can open behind the browser window.
+        activate = 'tell application "System Events" to activate'
+        if multiple:
+            # choose file returns a list here, so walk it into newline-separated
+            # POSIX paths - AppleScript will not coerce a list for us.
+            return [
+                "osascript",
+                "-e",
+                activate,
+                "-e",
+                f'set chosen to choose file with prompt "Choose {label}" '
+                f"of type {{{of_type}}} with multiple selections allowed",
+                "-e",
+                'set out to ""',
+                "-e",
+                "repeat with f in chosen",
+                "-e",
+                "set out to out & (POSIX path of f) & linefeed",
+                "-e",
+                "end repeat",
+                "-e",
+                "return out",
+            ]
         return [
             "osascript",
-            # Without this the panel can open behind the browser window.
             "-e",
-            'tell application "System Events" to activate',
+            activate,
             "-e",
             f'POSIX path of (choose file with prompt "Choose {label}" of type {{{of_type}}})',
         ]
 
     if platform.startswith("linux"):
         patterns = " ".join(f"*.{e}" for e in extensions)
-        return [
+        cmd = [
             "zenity",
             "--file-selection",
             f"--title=Choose {label}",
             f"--file-filter={label} | {patterns}",
         ]
+        if multiple:
+            cmd += ["--multiple", f"--separator={ZENITY_SEPARATOR}"]
+        return cmd
 
     if platform.startswith("win"):
         patterns = ";".join(f"*.{e}" for e in extensions)
@@ -75,42 +142,55 @@ def build_command(platform: str, kind: str) -> list[str]:
             "$d = New-Object System.Windows.Forms.OpenFileDialog; "
             f"$d.Title = 'Choose {label}'; "
             f"$d.Filter = '{label}|{patterns}'; "
-            "if ($d.ShowDialog() -eq 'OK') { $d.FileName }"
         )
+        if multiple:
+            script += "$d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { $d.FileNames }"
+        else:
+            script += "if ($d.ShowDialog() -eq 'OK') { $d.FileName }"
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
 
     raise FileDialogUnavailable(f"No native file dialog for platform {platform!r}")
 
 
-def parse_result(platform: str, returncode: int, stdout: str, stderr: str) -> str | None:
-    """Turn a picker's exit into a path, or None if the user dismissed it.
+def _split_paths(platform: str, raw: str) -> list[str]:
+    """Split a picker's output into paths, dropping blanks."""
+    # zenity joins multiple results with "|"; the others use newlines.
+    parts = raw.split(ZENITY_SEPARATOR) if platform.startswith("linux") else [raw]
+    lines: list[str] = []
+    for part in parts:
+        lines.extend(part.splitlines())
+    return [line.strip() for line in lines if line.strip()]
 
-    Cancelling is a normal outcome, not a failure: every backend signals it
-    differently, which is why this is a separate, tested step.
+
+def parse_result(platform: str, returncode: int, stdout: str, stderr: str) -> list[str]:
+    """Turn a picker's exit into the chosen paths. An empty list means cancelled.
+
+    Cancelling is a normal outcome, not a failure, and each backend signals it
+    differently - which is why this is a separate, tested step.
     """
-    path = stdout.strip()
+    raw = stdout.strip()
 
     if platform == "darwin":
         if returncode == 0:
-            return path or None
+            return _split_paths(platform, raw)
         # AppleScript spells it "canceled"; -128 is the user-cancelled code.
         if "user canceled" in stderr.lower() or "-128" in stderr:
-            return None
+            return []
         raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
 
     if platform.startswith("linux"):
         # zenity exits 1 on dismiss, with nothing on stdout.
         if returncode != 0:
-            if path:
+            if raw:
                 raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
-            return None
-        return path or None
+            return []
+        return _split_paths(platform, raw)
 
     if platform.startswith("win"):
         # PowerShell exits 0 either way; an empty result means dismissed.
         if returncode != 0:
             raise RuntimeError(stderr.strip() or "The file dialog closed unexpectedly")
-        return path or None
+        return _split_paths(platform, raw)
 
     raise FileDialogUnavailable(f"No native file dialog for platform {platform!r}")
 
@@ -131,18 +211,19 @@ async def _subprocess_runner(cmd: list[str], timeout: float) -> tuple[int, str, 
     return process.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-async def choose_file(
+async def choose_paths(
     kind: str,
     *,
+    multiple: bool = False,
     runner=None,
     platform: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
-) -> str | None:
-    """Open the native picker for `kind`. Returns the path, or None if cancelled."""
+) -> list[str]:
+    """Open the native picker for `kind`. Returns chosen paths; empty if cancelled."""
     import sys
 
     resolved_platform = sys.platform if platform is None else platform
-    cmd = build_command(resolved_platform, kind)
+    cmd = build_command(resolved_platform, kind, multiple=multiple)
 
     if _dialog_lock.locked():
         raise FileDialogBusy("A file dialog is already open")
@@ -152,3 +233,15 @@ async def choose_file(
         returncode, stdout, stderr = await run(cmd, timeout)
 
     return parse_result(resolved_platform, returncode, stdout, stderr)
+
+
+async def choose_file(
+    kind: str,
+    *,
+    runner=None,
+    platform: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> str | None:
+    """Open the native picker for a single `kind`. None if cancelled."""
+    paths = await choose_paths(kind, runner=runner, platform=platform, timeout=timeout)
+    return paths[0] if paths else None

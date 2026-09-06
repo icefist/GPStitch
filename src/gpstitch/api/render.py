@@ -131,6 +131,8 @@ class PreCheckRequest(BaseModel):
     files: list[PreCheckFileInput] = Field(min_length=1, max_length=100)
     shared_gpx_path: str | None = None
     ffmpeg_profile: str | None = None
+    # When set, every render writes here instead of beside its source.
+    output_dir: str | None = None
 
 
 class OverwriteConflict(BaseModel):
@@ -138,6 +140,17 @@ class OverwriteConflict(BaseModel):
 
     video_path: str
     output_path: str
+
+
+class DuplicateOutput(BaseModel):
+    """Several inputs that would write to one output file.
+
+    Only possible once a shared output folder is chosen: outputs written beside
+    their source inherit their source folder, so their names cannot collide.
+    """
+
+    output_path: str
+    video_paths: list[str]
 
 
 class GPSFileInfo(BaseModel):
@@ -155,6 +168,7 @@ class PreCheckResponse(BaseModel):
 
     total_files: int
     overwrite_conflicts: list[OverwriteConflict]
+    duplicate_outputs: list[DuplicateOutput] = []
     gps_files: list[GPSFileInfo]  # All files with GPS info
     gps_issues_count: int  # Count of poor/no_signal files
 
@@ -170,6 +184,9 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
     overwrite_conflicts: list[OverwriteConflict] = []
     gps_files: list[GPSFileInfo] = []
     gps_issues_count = 0
+    # Output path -> the inputs that would write to it. Anything with more than
+    # one input is a collision that would silently discard a finished render.
+    planned_outputs: dict[str, list[str]] = {}
 
     # Output extension depends only on the (request-wide) profile — compute once.
     from gpstitch.services.renderer import get_output_extension_for_profile
@@ -189,8 +206,10 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
             )
             continue
 
-        # Check overwrite conflict
-        output_path = video_path.parent / f"{video_path.stem}_overlay{ext}"
+        # Check overwrite conflict against the folder we will actually write to.
+        output_dir = Path(request.output_dir) if request.output_dir else video_path.parent
+        output_path = output_dir / f"{video_path.stem}_overlay{ext}"
+        planned_outputs.setdefault(str(output_path), []).append(str(video_path))
         if output_path.exists():
             overwrite_conflicts.append(
                 OverwriteConflict(
@@ -254,9 +273,16 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
                 )
             )
 
+    duplicate_outputs = [
+        DuplicateOutput(output_path=output_path, video_paths=sources)
+        for output_path, sources in planned_outputs.items()
+        if len(sources) > 1
+    ]
+
     return PreCheckResponse(
         total_files=len(request.files),
         overwrite_conflicts=overwrite_conflicts,
+        duplicate_outputs=duplicate_outputs,
         gps_files=gps_files,
         gps_issues_count=gps_issues_count,
     )

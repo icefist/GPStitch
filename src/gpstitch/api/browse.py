@@ -10,13 +10,13 @@ import sys
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from gpstitch.services.file_dialog import (
     FileDialogBusy,
     FileDialogUnavailable,
     build_command,
-    choose_file,
+    choose_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,15 +25,28 @@ router = APIRouter()
 
 
 class BrowseRequest(BaseModel):
-    """Which FILES field is asking for a path."""
+    """Which field is asking, and whether it accepts more than one path."""
 
-    kind: Literal["video", "gps"]
+    kind: Literal["video", "gps", "folder"]
+    multiple: bool = False
+
+    @model_validator(mode="after")
+    def _folders_are_single(self) -> "BrowseRequest":
+        # The platforms disagree on multi-folder selection; reject at the edge
+        # so it surfaces as a 422 rather than a 500 from deeper down.
+        if self.kind == "folder" and self.multiple:
+            raise ValueError("Multiple selection is not supported for folders")
+        return self
 
 
 class BrowseResponse(BaseModel):
-    """The chosen path, or null when the user dismissed the dialog."""
+    """Chosen paths. Empty (and path null) when the user dismissed the dialog.
+
+    `path` is the first result, kept so single-select callers stay simple.
+    """
 
     path: str | None = None
+    paths: list[str] = []
 
 
 class BrowseAvailableResponse(BaseModel):
@@ -54,9 +67,9 @@ async def browse_available() -> BrowseAvailableResponse:
 
 @router.post("/browse", response_model=BrowseResponse)
 async def browse(request: BrowseRequest) -> BrowseResponse:
-    """Open the native file picker and return the chosen path."""
+    """Open the native file picker and return the chosen path(s)."""
     try:
-        path = await choose_file(request.kind)
+        paths = await choose_paths(request.kind, multiple=request.multiple)
     except FileDialogUnavailable as e:
         raise HTTPException(status_code=501, detail=str(e)) from e
     except FileDialogBusy as e:
@@ -67,4 +80,4 @@ async def browse(request: BrowseRequest) -> BrowseResponse:
         # reason through rather than prefixing text it may already contain.
         raise HTTPException(status_code=500, detail=str(e) or "File dialog failed") from e
 
-    return BrowseResponse(path=path)
+    return BrowseResponse(path=paths[0] if paths else None, paths=paths)
