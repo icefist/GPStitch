@@ -101,9 +101,7 @@ class TestCoarseTrackSample:
             patch("gpstitch.services.dji_meta_parser.FFMPEG") as ffmpeg,
         ):
             ffmpeg.return_value.binary = "ffmpeg"
-            points = sample_dji_meta_track(
-                tmp_path / "v.mp4", total_duration_s=100.0, samples=4, stream_index=2
-            )
+            points = sample_dji_meta_track(tmp_path / "v.mp4", total_duration_s=100.0, samples=4, stream_index=2)
 
         assert points == []
         assert calls["n"] == 4
@@ -165,9 +163,7 @@ class TestFirstPoint:
         with (
             patch("gpstitch.services.dji_meta_parser.subprocess.run", side_effect=fake_run),
             patch("gpstitch.services.dji_meta_parser.FFMPEG") as ffmpeg,
-            patch(
-                "gpstitch.services.dji_meta_parser.parse_dji_meta", return_value=[point]
-            ),
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta", return_value=[point]),
         ):
             ffmpeg.return_value.binary = "ffmpeg"
             got = first_dji_meta_point(tmp_path / "v.mp4", stream_index=2)

@@ -916,6 +916,11 @@ class UnifiedApp {
 
     _showPreviewLoading() {
         this.previewEmptyEl.style.display = 'none';
+        // The panel already existed in the markup but was never displayed, so a
+        // preview that takes seconds looked exactly like one that had died.
+        if (this.previewLoadingEl) {
+            this.previewLoadingEl.classList.add('visible');
+        }
         // Show spinner on refresh button
         if (this.refreshBtn) {
             this.refreshBtn.classList.add('loading');
@@ -923,6 +928,9 @@ class UnifiedApp {
     }
 
     _hidePreviewLoading() {
+        if (this.previewLoadingEl) {
+            this.previewLoadingEl.classList.remove('visible');
+        }
         if (this.refreshBtn) {
             this.refreshBtn.classList.remove('loading');
         }
