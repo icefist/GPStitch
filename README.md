@@ -13,6 +13,7 @@ powerful [gopro-overlay](https://github.com/time4tea/gopro-dashboard-overlay) li
 ## Features
 
 - **Quick Mode** — Select from predefined layouts, customize units and map styles
+- **Place Name Overlay** — Shows the town, village or city at the current GPS position, resolved from OpenStreetMap with an offline fallback
 - **Advanced Mode** — Visual drag-and-drop editor for creating custom overlay layouts
 - **Live Preview** — See your overlay in real-time as you configure it
 - **DJI Drone Support** — Automatic SRT telemetry parsing with timezone and time alignment auto-detection
@@ -249,6 +250,10 @@ Environment variables (prefix: `GPSTITCH_`):
 | `TEMPLATES_DIR`        | `~/.gpstitch/templates` | Custom templates directory                             |
 | `GOPRO_CONFIG_DIR`     | `~/.gopro-graphics`     | gopro-overlay config dir (user `ffmpeg-profiles.json`) |
 | `ENABLE_GOPRO_PATCHES` | `true`                  | Enable runtime patches for gopro-overlay               |
+| `PLACE_ENABLE_NETWORK` | `true`                  | Use online geocoding; `false` forces offline data      |
+| `PLACE_TARGET_METRES`  | `500`                   | Sampling resolution for place-name transitions         |
+| `PLACE_MAX_LOOKUPS`    | `400`                   | Hard cap on geocoding calls per render                 |
+| `PLACE_USER_AGENT`     | `GPStitch (+...)`       | Identifies the app to Nominatim, as its policy requires |
 | `USE_WRAPPER_SCRIPT`   | `true`                  | Use wrapper script for rendering                       |
 
 You can also use a `.env` file in the project root.
@@ -265,6 +270,7 @@ GPStitch includes runtime patches for `gopro-overlay` that add:
 - **DJI Osmo Action GPS** — Loads embedded protobuf GPS telemetry from DJI Action cameras with GPS Bluetooth Remote
   Controller
 - **Odometer offset** — Allows odometer to start from a custom offset value for shared GPX batch rendering
+- **Place name widget** — Adds a `place` component that renders the settlement name at the current GPS position
 
 Patches are applied automatically at startup. To disable:
 
@@ -324,6 +330,17 @@ This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) 
 
 - [gopro-dashboard-overlay](https://github.com/time4tea/gopro-dashboard-overlay) — The underlying overlay rendering
   engine
+
+### Place data
+
+The Place Name overlay resolves positions using
+[OpenStreetMap](https://www.openstreetmap.org/) data via
+[Nominatim](https://nominatim.openstreetmap.org/), licensed under the
+[ODbL 1.0](https://opendatacommons.org/licenses/odbl/), and a bundled
+[GeoNames](https://www.geonames.org/) dataset, licensed
+[CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+If you publish videos carrying these place names, please credit both sources.
 
 ## Support
 

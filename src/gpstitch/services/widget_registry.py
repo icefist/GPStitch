@@ -176,6 +176,58 @@ class WidgetRegistry:
             ],
         )
 
+        # PLACE NAME
+        self._metadata["place"] = WidgetMetadata(
+            type="place",
+            name="Place Name",
+            description=(
+                "Name of the town, village or city at the current GPS position. "
+                "Place data (c) OpenStreetMap contributors (ODbL 1.0) and GeoNames (CC-BY 4.0)."
+            ),
+            category=WidgetCategory.TEXT,
+            icon="P",
+            default_width=200,
+            default_height=30,
+            properties=_common_position_props()
+            + [
+                PropertyDefinition(
+                    name="lang",
+                    label="Name Language",
+                    type=PropertyType.SELECT,
+                    description=(
+                        "Language for place names. Applies to online lookups only - "
+                        "the offline dataset ships local names, not translations."
+                    ),
+                    options=[
+                        SelectOption(value="en", label="English"),
+                        SelectOption(value="de", label="German"),
+                        SelectOption(value="fr", label="French"),
+                        SelectOption(value="es", label="Spanish"),
+                        SelectOption(value="it", label="Italian"),
+                        SelectOption(value="nl", label="Dutch"),
+                        SelectOption(value="hu", label="Hungarian"),
+                        SelectOption(value="ru", label="Russian"),
+                    ],
+                    constraints=PropertyConstraints(default="en"),
+                    category="Content",
+                ),
+            ]
+            + _common_text_props()
+            + [
+                PropertyDefinition(
+                    name="direction",
+                    label="Direction",
+                    type=PropertyType.SELECT,
+                    options=[
+                        SelectOption(value="ltr", label="Left to Right"),
+                        SelectOption(value="ttb", label="Top to Bottom"),
+                    ],
+                    constraints=PropertyConstraints(default="ltr"),
+                    category="Appearance",
+                ),
+            ],
+        )
+
         # METRIC
         self._metadata["metric"] = WidgetMetadata(
             type="metric",

@@ -615,6 +615,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-multipart" },
+    { name = "requests" },
     { name = "setuptools" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -650,6 +651,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-playwright", marker = "extra == 'dev'", specifier = ">=0.7.2" },
     { name = "python-multipart", specifier = ">=0.0.22" },
+    { name = "requests", specifier = ">=2.32.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.14" },
     { name = "setuptools", specifier = "<82" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.40.0" },

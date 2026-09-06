@@ -7,6 +7,7 @@ without modifying the original library. Changes include:
 - DJI camera metrics support (metric_accessor patch, always applied)
 - DJI SRT→GPX load bypass (gpx_patches, applied conditionally via wrapper
   when --ts-srt-source is present — preserves camera metrics in video render)
+- Place name overlay widget (`create_place` component, always applied)
 """
 
 import logging
@@ -31,10 +32,12 @@ def apply_patches() -> None:
     from gpstitch.patches.ffmpeg_gopro_patches import patch_ffmpeg_gopro
     from gpstitch.patches.ffmpeg_overlay_patches import patch_ffmpeg_overlay
     from gpstitch.patches.metric_patches import patch_metric_accessor
+    from gpstitch.patches.place_patches import patch_place_widget
 
     patch_ffmpeg_gopro()
     patch_ffmpeg_overlay()
     patch_metric_accessor()
+    patch_place_widget()
 
     _patches_applied = True
     logger.info("gopro_overlay runtime patches applied successfully")
