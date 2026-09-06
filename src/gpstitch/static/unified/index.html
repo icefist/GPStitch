@@ -273,6 +273,15 @@
                         <small class="config-hint" id="ffmpeg-profile-hint"></small>
                     </div>
                     <div class="config-group">
+                        <label>Output Folder</label>
+                        <div class="output-folder-row">
+                            <span id="output-folder-value" class="output-folder-value">Alongside source video</span>
+                            <button id="output-folder-btn" class="btn btn-sm btn-secondary" title="Choose an output folder">Browse…</button>
+                            <button id="output-folder-clear" class="btn btn-sm btn-text" title="Write next to each source video">Reset</button>
+                        </div>
+                        <small class="config-hint">Filenames are still derived from each source video.</small>
+                    </div>
+                    <div class="config-group">
                         <small class="config-hint" style="margin-bottom: 8px; display: block;">GPS filters remove bad data points (jumps, glitches)</small>
                     </div>
                     <div class="config-row">
@@ -366,6 +375,7 @@
     <script src="/static/unified/js/components/GPSQualityCard.js"></script>
     <script src="/static/unified/js/components/GPSQualityIndicator.js"></script>
     <script src="/static/unified/js/components/GPSWarningModal.js"></script>
+    <script src="/static/unified/js/services/OutputFolder.js"></script>
     <script src="/static/unified/js/components/GPSBatchWarningDialog.js"></script>
     <script src="/static/unified/js/components/RenderModal.js"></script>
     <script src="/static/unified/js/components/BatchRenderModal.js"></script>

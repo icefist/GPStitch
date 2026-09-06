@@ -37,6 +37,9 @@ class RenderJobRequest(BaseModel):
     layout: str = "default-1920x1080"
     layout_xml_path: str | None = None
     output_file: str | None = None  # Auto-generated if not provided
+    # Folder to write into. The filename is still derived from the source,
+    # because the extension depends on the ffmpeg profile. output_file wins.
+    output_dir: str | None = None
     units_speed: str = DEFAULT_UNITS_SPEED
     units_altitude: str = DEFAULT_UNITS_ALTITUDE
     units_distance: str = DEFAULT_UNITS_DISTANCE
@@ -330,7 +333,7 @@ async def start_render(request: RenderJobRequest, background_tasks: BackgroundTa
     if not output_file:
         from gpstitch.services.renderer import get_output_extension_for_profile
 
-        primary_dir = os.path.dirname(primary.file_path)
+        primary_dir = request.output_dir or os.path.dirname(primary.file_path)
         primary_name = os.path.splitext(os.path.basename(primary.file_path))[0]
         ext = get_output_extension_for_profile(request.ffmpeg_profile)
         output_file = os.path.join(primary_dir, f"{primary_name}_overlay{ext}")
@@ -468,6 +471,8 @@ class BatchRenderRequest(BaseModel):
 
     files: list[BatchFileInput] = Field(min_length=1)
     shared_gpx_path: str | None = None
+    # Folder to write every output into; per-file output_path still wins.
+    output_dir: str | None = None
     layout: str = "default-1920x1080"
     layout_xml_path: str | None = None
     units_speed: str = DEFAULT_UNITS_SPEED
@@ -645,7 +650,8 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
             # Auto-generate output filename if not specified
             output_file = file_input.output_path
             if not output_file:
-                output_file = str(video_path.parent / f"{video_path.stem}_overlay{ext}")
+                out_dir = Path(request.output_dir) if request.output_dir else video_path.parent
+                output_file = str(out_dir / f"{video_path.stem}_overlay{ext}")
 
             # Calculate odo_offset when using shared GPX (not per-file override)
             odo_offset = None

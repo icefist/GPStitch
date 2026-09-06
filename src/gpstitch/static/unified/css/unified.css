@@ -3193,3 +3193,32 @@ select {
 .btn-warning:hover {
     background: #e6bc5c;
 }
+
+/* Output folder control: the path is the long part, so let it take the room
+   and shrink with an ellipsis rather than pushing the buttons out of view. */
+.output-folder-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.output-folder-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+}
+
+/* Keep the Add Videos button on the same line as the File Paths label. */
+.batch-files-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
