@@ -10,7 +10,7 @@ from gpstitch.models.schemas import FileInfo, FileRole, VideoMetadata
 class TestDjiActionUploadSkipsSecondary:
     """Verify DJI Action videos with embedded GPS skip secondary file detection."""
 
-    def _make_video_metadata(self, has_dji_meta: bool = False, dji_meta_point_count: int | None = None):
+    def _make_video_metadata(self, has_dji_meta: bool = False):
         return VideoMetadata(
             width=1920,
             height=1080,
@@ -19,7 +19,6 @@ class TestDjiActionUploadSkipsSecondary:
             frame_rate=25.0,
             has_gps=False,
             has_dji_meta=has_dji_meta,
-            dji_meta_point_count=dji_meta_point_count,
         )
 
     def _make_file_info(self, video_path, video_metadata):
@@ -39,7 +38,7 @@ class TestDjiActionUploadSkipsSecondary:
         srt_path = tmp_path / "DJI_20260315_0001.SRT"
         srt_path.write_text("fake srt")
 
-        video_metadata = self._make_video_metadata(has_dji_meta=True, dji_meta_point_count=125)
+        video_metadata = self._make_video_metadata(has_dji_meta=True)
         file_info = self._make_file_info(video_path, video_metadata)
 
         with (

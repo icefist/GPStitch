@@ -33,6 +33,9 @@ class UnifiedApp {
         this.mapStyleSelect = document.getElementById('map-style');
         this.ffmpegProfileSelect = document.getElementById('ffmpeg-profile');
         this.ffmpegProfileHint = document.getElementById('ffmpeg-profile-hint');
+        this.outputFolderValue = document.getElementById('output-folder-value');
+        this.outputFolderBtn = document.getElementById('output-folder-btn');
+        this.outputFolderClear = document.getElementById('output-folder-clear');
 
         // GPS filter inputs
         this.gpsDopMaxInput = document.getElementById('gps-dop-max');
@@ -282,7 +285,43 @@ class UnifiedApp {
     /**
      * Attach event listeners
      */
+    /**
+     * Output folder control. The value is shared with batch render, so it
+     * renders from OutputFolder rather than from local state.
+     */
+    _initOutputFolder() {
+        const render = () => {
+            const folder = window.OutputFolder.get();
+            if (this.outputFolderValue) {
+                this.outputFolderValue.textContent = window.OutputFolder.label();
+                // Left-clipping suits a path but mangles the default label.
+                this.outputFolderValue.classList.toggle('is-path', Boolean(folder));
+            }
+            if (this.outputFolderClear) {
+                this.outputFolderClear.hidden = !folder;
+            }
+        };
+
+        this.outputFolderBtn?.addEventListener('click', async () => {
+            this.outputFolderBtn.disabled = true;
+            try {
+                await window.OutputFolder.choose();
+            } catch (error) {
+                console.error('Output folder selection failed:', error);
+                alert(error.message);
+            } finally {
+                this.outputFolderBtn.disabled = false;
+            }
+        });
+
+        this.outputFolderClear?.addEventListener('click', () => window.OutputFolder.clear());
+
+        window.OutputFolder.onChange(render);
+        render();
+    }
+
     _attachEventListeners() {
+        this._initOutputFolder();
         // Config changes trigger preview update
         this.layoutSelect.addEventListener('change', () => {
             this.state.updateQuickConfig({ layout: this.layoutSelect.value });
@@ -877,6 +916,11 @@ class UnifiedApp {
 
     _showPreviewLoading() {
         this.previewEmptyEl.style.display = 'none';
+        // The panel already existed in the markup but was never displayed, so a
+        // preview that takes seconds looked exactly like one that had died.
+        if (this.previewLoadingEl) {
+            this.previewLoadingEl.classList.add('visible');
+        }
         // Show spinner on refresh button
         if (this.refreshBtn) {
             this.refreshBtn.classList.add('loading');
@@ -884,6 +928,9 @@ class UnifiedApp {
     }
 
     _hidePreviewLoading() {
+        if (this.previewLoadingEl) {
+            this.previewLoadingEl.classList.remove('visible');
+        }
         if (this.refreshBtn) {
             this.refreshBtn.classList.remove('loading');
         }
@@ -1014,6 +1061,12 @@ class UnifiedApp {
                 map_style: config.mapStyle || 'osm',
                 ffmpeg_profile: this.state.quickConfig.ffmpegProfile || null
             };
+
+            // Where to write. Null means the backend's default: next to the source.
+            const outputFolder = window.OutputFolder?.get();
+            if (outputFolder) {
+                requestPayload.output_dir = outputFolder;
+            }
 
             // Add GPX/FIT options if applicable
             const gpxFitOptions = this.state.getGpxFitOptions();

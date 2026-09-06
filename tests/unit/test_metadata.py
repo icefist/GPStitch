@@ -169,18 +169,12 @@ class TestExtractVideoMetadataDjiMeta:
             patch("gopro_overlay.ffmpeg.FFMPEG"),
             patch("gopro_overlay.ffmpeg_gopro.FFMPEGGoPro") as mock_gopro_cls,
             patch.object(gpstitch.services.dji_meta_parser, "detect_dji_meta_stream", return_value=2),
-            patch.object(
-                gpstitch.services.dji_meta_parser,
-                "get_dji_meta_metadata",
-                return_value={"gps_point_count": 125, "duration_seconds": 5.0},
-            ),
         ):
             mock_gopro_cls.return_value.find_recording.return_value = mock_recording
             metadata = extract_video_metadata(Path("/fake/DJI_ACTION.MP4"))
 
         assert metadata is not None
         assert metadata.has_dji_meta is True
-        assert metadata.dji_meta_point_count == 125
 
     @patch("gpstitch.services.metadata.get_video_rotation", return_value=0)
     def test_regular_video_has_dji_meta_false(self, _mock_rotation):
@@ -200,7 +194,6 @@ class TestExtractVideoMetadataDjiMeta:
 
         assert metadata is not None
         assert metadata.has_dji_meta is False
-        assert metadata.dji_meta_point_count is None
 
     @patch("gpstitch.services.metadata.get_video_rotation", return_value=0)
     def test_dji_meta_detection_failure_doesnt_break_extraction(self, _mock_rotation):
@@ -219,4 +212,3 @@ class TestExtractVideoMetadataDjiMeta:
 
         assert metadata is not None
         assert metadata.has_dji_meta is False
-        assert metadata.dji_meta_point_count is None

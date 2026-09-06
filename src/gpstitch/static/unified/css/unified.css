@@ -341,10 +341,19 @@ body {
 .file-field-input-row {
     display: flex;
     gap: var(--space-2);
+    flex-wrap: wrap;
+}
+
+/* With a Browse button the row carries three controls, which squeezes the
+   path too narrow to read in this sidebar. Give the path its own line and let
+   the buttons wrap beneath it. Rows without a Browse button are untouched. */
+.file-field-input-row:has(.file-browse-btn) .file-path-input {
+    flex: 1 1 100%;
 }
 
 .file-path-input {
     flex: 1;
+    min-width: 0;
     padding: var(--space-2) var(--space-3);
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
@@ -3183,4 +3192,51 @@ select {
 
 .btn-warning:hover {
     background: #e6bc5c;
+}
+
+/* Output folder control: the path is the long part, so let it take the room
+   and shrink with an ellipsis rather than pushing the buttons out of view. */
+.output-folder-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.output-folder-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+}
+
+/* A path's tail identifies it, so long paths clip at the start. Applied only
+   when a path is shown: it would mangle the plain-language default label. */
+.output-folder-value.is-path {
+    direction: rtl;
+    text-align: left;
+}
+
+/* .btn sets display, which otherwise beats [hidden] on specificity. */
+.btn[hidden] {
+    display: none;
+}
+
+/* Keep the Add Videos button on the same line as the File Paths label. */
+.batch-files-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.preview-loading-hint {
+    margin-top: var(--space-2);
+    font-size: var(--font-size-sm);
+    color: var(--color-text-tertiary, var(--color-text-secondary));
+    text-align: center;
+    max-width: 32ch;
 }

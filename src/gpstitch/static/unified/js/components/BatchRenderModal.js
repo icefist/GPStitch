@@ -61,7 +61,10 @@ class BatchRenderModal {
                                 For video + GPX/FIT pairs, separate with comma.
                             </p>
                             <div class="form-group">
-                                <label>File Paths</label>
+                                <div class="batch-files-label-row">
+                                    <label>File Paths</label>
+                                    <button id="batch-add-videos-btn" class="btn btn-sm btn-secondary" title="Choose videos to add">Add Videos…</button>
+                                </div>
                                 <textarea
                                     id="batch-files-input"
                                     placeholder="/path/to/video1.mp4
@@ -74,6 +77,14 @@ class BatchRenderModal {
 
                             <div class="batch-preview">
                                 <strong>Files to process: <span id="batch-file-count">0</span></strong>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Output Folder</label>
+                                <div class="output-folder-row">
+                                    <span id="batch-output-folder-value" class="output-folder-value">Alongside source video</span>
+                                    <button id="batch-output-folder-btn" class="btn btn-sm btn-secondary">Browse…</button>
+                                </div>
                             </div>
 
                             <div class="batch-options">
@@ -166,6 +177,9 @@ class BatchRenderModal {
         this.inputView = document.getElementById('batch-input-view');
         this.progressView = document.getElementById('batch-progress-view');
         this.filesInput = document.getElementById('batch-files-input');
+        this.addVideosBtn = document.getElementById('batch-add-videos-btn');
+        this.outputFolderValue = document.getElementById('batch-output-folder-value');
+        this.outputFolderBtn = document.getElementById('batch-output-folder-btn');
         this.fileCountEl = document.getElementById('batch-file-count');
         this.progressBar = document.getElementById('batch-progress-bar');
         this.progressText = document.getElementById('batch-progress-text');
@@ -210,6 +224,10 @@ class BatchRenderModal {
         this.startBtn.addEventListener('click', () => this._startBatchRender());
 
         this.filesInput.addEventListener('input', () => this._updateFileCount());
+        this.addVideosBtn?.addEventListener('click', () => this._addVideos());
+        this.outputFolderBtn?.addEventListener('click', () => this._chooseOutputFolder());
+        window.OutputFolder?.onChange(() => this._renderOutputFolder());
+        this._renderOutputFolder();
 
         this.sharedGpxInput.addEventListener('input', () => this._onSharedGpxChange());
 
@@ -275,6 +293,69 @@ class BatchRenderModal {
             this.helpText.innerHTML = 'Enter file paths, one per line.<br>For video + GPX/FIT pairs, separate with comma.';
             this.filesHint.textContent = 'Format: video.mp4 or video.mp4, track.gpx';
             this.filesInput.placeholder = '/path/to/video1.mp4\n/path/to/video2.mp4, /path/to/track2.gpx\n/path/to/video3.mp4';
+        }
+    }
+
+    /**
+     * Add videos chosen from the host's native picker.
+     *
+     * Appends rather than replaces, so a batch can be gathered from several
+     * folders, and skips paths already listed so re-picking is harmless. The
+     * textarea stays editable - this is a shortcut, not a replacement.
+     */
+    async _addVideos() {
+        this.addVideosBtn.disabled = true;
+        try {
+            const response = await fetch('/api/browse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind: 'video', multiple: true }),
+            });
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || `Could not open the file browser (${response.status})`);
+            }
+
+            const { paths } = await response.json();
+            if (!paths || paths.length === 0) return;
+
+            const existing = this.filesInput.value
+                .split('\n')
+                .map(line => line.trim())
+                .filter(Boolean);
+            // A line may be "video.mp4, track.gpx"; compare on the video only.
+            const listed = new Set(existing.map(line => line.split(',')[0].trim()));
+
+            const added = paths.filter(path => !listed.has(path));
+            this.filesInput.value = [...existing, ...added].join('\n');
+            this._updateFileCount();
+        } catch (error) {
+            console.error('Add videos failed:', error);
+            alert(error.message);
+        } finally {
+            this.addVideosBtn.disabled = false;
+        }
+    }
+
+    _renderOutputFolder() {
+        if (this.outputFolderValue && window.OutputFolder) {
+            this.outputFolderValue.textContent = window.OutputFolder.label();
+            this.outputFolderValue.classList.toggle(
+                'is-path',
+                Boolean(window.OutputFolder.get())
+            );
+        }
+    }
+
+    async _chooseOutputFolder() {
+        this.outputFolderBtn.disabled = true;
+        try {
+            await window.OutputFolder.choose();
+        } catch (error) {
+            console.error('Output folder selection failed:', error);
+            alert(error.message);
+        } finally {
+            this.outputFolderBtn.disabled = false;
         }
     }
 
@@ -364,6 +445,30 @@ class BatchRenderModal {
                 const preCheck = await this._preCheckFiles(files);
 
                 this.analyzingEl.style.display = 'none';
+
+                // 0. Two inputs writing to one output file.
+                //
+                // Only possible once a shared output folder is chosen: outputs
+                // written beside their source inherit its folder, so they cannot
+                // collide. Left alone, the second render silently destroys the
+                // first, so stop and let the user decide.
+                if (preCheck.duplicate_outputs && preCheck.duplicate_outputs.length > 0) {
+                    const lines = preCheck.duplicate_outputs.map(d => {
+                        const sources = d.video_paths.map(p => `  • ${p}`).join('\n');
+                        return `${d.output_path}\n${sources}`;
+                    });
+                    const proceed = confirm(
+                        `${preCheck.duplicate_outputs.length} output file(s) would be written ` +
+                        `by more than one video. Later renders would overwrite earlier ones:\n\n` +
+                        `${lines.join('\n\n')}\n\n` +
+                        `Rename the clips or choose a different output folder.\n\nRender anyway?`
+                    );
+                    if (!proceed) {
+                        this.startBtn.disabled = false;
+                        this.startBtn.textContent = 'Start Batch Render';
+                        return;
+                    }
+                }
 
                 // 1. Handle overwrite conflicts
                 if (preCheck.overwrite_conflicts && preCheck.overwrite_conflicts.length > 0) {
@@ -514,6 +619,12 @@ class BatchRenderModal {
         if (sharedGpx) {
             payload.shared_gpx_path = sharedGpx;
         }
+        // Without this the overwrite check inspects the source folders instead,
+        // and cannot see two clips that would claim the same output name.
+        const preCheckFolder = window.OutputFolder?.get();
+        if (preCheckFolder) {
+            payload.output_dir = preCheckFolder;
+        }
         const response = await fetch('/api/render/pre-check', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -588,6 +699,11 @@ class BatchRenderModal {
             gps_dop_max: this.state.quickConfig?.gpsDopMax || 20,
             gps_speed_max: this.state.quickConfig?.gpsSpeedMax || 200,
         };
+
+        const outputFolder = window.OutputFolder?.get();
+        if (outputFolder) {
+            request.output_dir = outputFolder;
+        }
 
         this.startBtn.textContent = 'Starting...';
 

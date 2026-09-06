@@ -18,6 +18,7 @@ class FileUploader {
 
         this.isUploading = false;
         this.localMode = false;
+        this.browseAvailable = false;
 
         this._init();
     }
@@ -32,6 +33,19 @@ class FileUploader {
             }
         } catch (e) {
             console.warn('Could not fetch config, using default mode');
+        }
+
+        // A native file picker only exists on some platforms; hide the button
+        // rather than offering one that always errors.
+        if (this.localMode) {
+            try {
+                const response = await fetch('/api/browse/available');
+                if (response.ok) {
+                    this.browseAvailable = (await response.json()).available;
+                }
+            } catch (e) {
+                console.warn('Could not check file browser availability');
+            }
         }
 
         this._render();
@@ -49,6 +63,9 @@ class FileUploader {
                 ${this.localMode ? `
                     <div class="file-field-input-row">
                         <input type="text" id="video-path-input" class="file-path-input" placeholder="/path/to/video.mp4">
+                        ${this.browseAvailable ? `
+                            <button id="video-browse-btn" class="btn btn-sm btn-secondary file-browse-btn" title="Browse for a video">Browse…</button>
+                        ` : ''}
                         <button id="video-load-btn" class="btn btn-sm btn-primary">Load</button>
                     </div>
                 ` : `
@@ -72,6 +89,9 @@ class FileUploader {
                 ${this.localMode ? `
                     <div class="file-field-input-row">
                         <input type="text" id="gps-path-input" class="file-path-input" placeholder="/path/to/track.gpx or .srt">
+                        ${this.browseAvailable ? `
+                            <button id="gps-browse-btn" class="btn btn-sm btn-secondary file-browse-btn" title="Browse for GPS data">Browse…</button>
+                        ` : ''}
                         <button id="gps-load-btn" class="btn btn-sm btn-primary">Load</button>
                     </div>
                 ` : `
@@ -113,6 +133,9 @@ class FileUploader {
             // Local mode: path inputs
             document.getElementById('video-load-btn')?.addEventListener('click', () => this._loadLocalFile('video'));
             document.getElementById('gps-load-btn')?.addEventListener('click', () => this._loadLocalFile('gps'));
+
+            document.getElementById('video-browse-btn')?.addEventListener('click', () => this._browseFor('video'));
+            document.getElementById('gps-browse-btn')?.addEventListener('click', () => this._browseFor('gps'));
 
             this.videoPathInput?.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') this._loadLocalFile('video');
@@ -190,10 +213,67 @@ class FileUploader {
         return path.trim();
     }
 
+    /**
+     * Open the host's native file picker and load whatever the user chooses.
+     *
+     * The dialog runs on the machine hosting the server, and blocks until it
+     * is dismissed - so the button is disabled meanwhile to make that visible
+     * and to avoid a second request the server would refuse anyway.
+     */
+    async _browseFor(type) {
+        const button = document.getElementById(`${type}-browse-btn`);
+        const input = type === 'video' ? this.videoPathInput : this.gpsPathInput;
+        if (!input) return;
+
+        const original = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Choosing…';
+        }
+
+        try {
+            const response = await fetch('/api/browse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind: type }),
+            });
+
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || `Browse failed (${response.status})`);
+            }
+
+            const { path } = await response.json();
+            // A cancelled dialog returns null; leave whatever was typed alone.
+            if (!path) return;
+
+            input.value = path;
+            await this._loadLocalFile(type);
+        } catch (error) {
+            console.error('Browse failed:', error);
+            alert(error.message || 'Could not open the file browser');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = original;
+            }
+        }
+    }
+
     async _loadLocalFile(type) {
         const input = type === 'video' ? this.videoPathInput : this.gpsPathInput;
         const path = this._cleanPath(input.value);
         if (!path) return;
+
+        // Reading a large clip off an external volume is real work and can take
+        // minutes, so say so - and disable the button, since a second click
+        // would queue another read of the same file.
+        const loadButton = document.getElementById(`${type}-load-btn`);
+        const loadButtonText = loadButton?.textContent;
+        if (loadButton) {
+            loadButton.disabled = true;
+            loadButton.textContent = 'Reading…';
+        }
 
         // Determine role based on current state and type
         const hasVideo = this.state.getPrimaryFile()?.file_type === 'video';
@@ -267,6 +347,11 @@ class FileUploader {
         } catch (error) {
             console.error('Load failed:', error);
             alert(error.message);
+        } finally {
+            if (loadButton) {
+                loadButton.disabled = false;
+                loadButton.textContent = loadButtonText;
+            }
         }
     }
 

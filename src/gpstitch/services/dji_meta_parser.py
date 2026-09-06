@@ -300,12 +300,25 @@ def detect_dji_meta_stream(file_path: Path) -> int | None:
     return None
 
 
-def extract_dji_meta_raw(file_path: Path, stream_index: int) -> bytes:
+def extract_dji_meta_raw(
+    file_path: Path,
+    stream_index: int,
+    *,
+    start_s: float | None = None,
+    duration_s: float | None = None,
+) -> bytes:
     """Extract raw DJI meta stream bytes using ffmpeg.
+
+    With no bounds this reads the whole stream, whose samples are interleaved
+    across the entire file - so it costs a full seek through it. Rendering needs
+    that; a single preview frame does not, which is what the bounds are for.
 
     Args:
         file_path: Path to the video file
         stream_index: Stream index of the DJI meta track
+        start_s: Seek to this offset first. Passed before -i, which seeks by
+            index rather than decoding forward from the start.
+        duration_s: Stop after this much content.
 
     Returns:
         Raw protobuf bytes (concatenated samples)
@@ -314,25 +327,101 @@ def extract_dji_meta_raw(file_path: Path, stream_index: int) -> bytes:
         RuntimeError: If ffmpeg extraction fails
     """
     ffmpeg_bin = FFMPEG().binary
-    result = subprocess.run(
-        [
-            ffmpeg_bin,
-            "-i",
-            str(file_path),
-            "-map",
-            f"0:{stream_index}",
-            "-c",
-            "copy",
-            "-f",
-            "data",
-            "pipe:1",
-        ],
-        capture_output=True,
-    )
+    cmd = [ffmpeg_bin]
+    if start_s is not None:
+        # Before -i: ffmpeg seeks using the container index instead of decoding
+        # from the beginning, which is what makes this cheap on a large file.
+        cmd += ["-ss", str(start_s)]
+    cmd += ["-i", str(file_path), "-map", f"0:{stream_index}", "-c", "copy", "-f", "data"]
+    if duration_s is not None:
+        cmd += ["-t", str(duration_s)]
+    cmd += ["pipe:1"]
+
+    result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         stderr_msg = result.stderr.decode(errors="replace").strip() if result.stderr else ""
         raise RuntimeError(f"ffmpeg failed to extract DJI meta stream from {file_path}: {stderr_msg}")
     return result.stdout
+
+
+def parse_dji_meta_window(
+    file_path: Path,
+    *,
+    start_s: float,
+    duration_s: float,
+    stream_index: int | None = None,
+) -> list[DjiMetaPoint]:
+    """GPS points from a slice of the stream around `start_s`."""
+    idx = stream_index if stream_index is not None else detect_dji_meta_stream(file_path)
+    if idx is None:
+        return []
+    raw = extract_dji_meta_raw(file_path, idx, start_s=max(0.0, start_s), duration_s=duration_s)
+    return parse_dji_meta(raw)
+
+
+# Windows tried when hunting for the first GPS point. A camera can take a while
+# to get a fix - one real clip had none in its first 10s and 490 points by 60s -
+# so an empty first window means widen, not "no GPS".
+FIRST_POINT_WINDOWS_S = (30.0, 120.0, 300.0)
+
+
+def first_dji_meta_point(
+    file_path: Path,
+    *,
+    stream_index: int | None = None,
+) -> "DjiMetaPoint | None":
+    """The first GPS point, read from the start of the stream rather than all of it.
+
+    Callers want this for the recording's start time. Parsing the whole stream
+    to reach its first record means seeking through the entire file.
+    """
+    idx = stream_index if stream_index is not None else detect_dji_meta_stream(file_path)
+    if idx is None:
+        return None
+
+    for window_s in FIRST_POINT_WINDOWS_S:
+        try:
+            raw = extract_dji_meta_raw(file_path, idx, start_s=0.0, duration_s=window_s)
+        except RuntimeError:
+            return None
+        points = parse_dji_meta(raw)
+        if points:
+            return points[0]
+
+    return None
+
+
+def sample_dji_meta_track(
+    file_path: Path,
+    *,
+    total_duration_s: float,
+    samples: int = 20,
+    window_s: float = 2.0,
+    stream_index: int | None = None,
+) -> list[DjiMetaPoint]:
+    """A coarse view of the whole track, from short windows spread across it.
+
+    Enough for a preview's journey map and a rough odometer without reading the
+    entire stream. One failed window is skipped rather than losing the rest.
+    """
+    idx = stream_index if stream_index is not None else detect_dji_meta_stream(file_path)
+    if idx is None:
+        return []
+
+    count = max(1, samples) if total_duration_s > 0 else 1
+    step = total_duration_s / count if count > 1 else 0.0
+
+    points: list[DjiMetaPoint] = []
+    for i in range(count):
+        try:
+            raw = extract_dji_meta_raw(file_path, idx, start_s=i * step, duration_s=window_s)
+        except RuntimeError:
+            logger.debug("DJI meta sample window at %.1fs failed for %s", i * step, file_path)
+            continue
+        points.extend(parse_dji_meta(raw))
+
+    points.sort(key=lambda p: p.timestamp)
+    return points
 
 
 # --- Main parsing functions ---
