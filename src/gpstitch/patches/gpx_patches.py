@@ -99,8 +99,20 @@ def patch_dji_meta_load(video_path: str) -> None:
     if not points:
         raise ValueError(f"No valid GPS data found in DJI meta stream: {video_filepath}")
 
-    # Calculate sample rate: DJI Action typically records at 25fps, thin to ~1Hz
-    duration_s = max((points[-1].timestamp - points[0].timestamp).total_seconds(), 1)
+    # Thin to the target Hz. A track spanning no time has no rate to derive from,
+    # and dividing by a floored one-second duration turned a clip whose GPS clock
+    # never advanced into points[::43917]. Timeseries is keyed by timestamp, so
+    # such a track collapses to one point however it is thinned - there is nothing
+    # to render. The parser rebuilds a frozen clock; this says so plainly when
+    # even that could not.
+    duration_s = (points[-1].timestamp - points[0].timestamp).total_seconds()
+    if duration_s <= 0:
+        raise ValueError(
+            f"GPS track in {video_filepath.name} spans no time - all {len(points)} points are stamped "
+            f"{points[0].timestamp}. The camera's GPS clock did not advance and its sample rate could "
+            "not be recovered, so the track cannot be aligned with the video."
+        )
+
     source_hz = len(points) / duration_s
     sample_rate = calc_sample_rate(source_hz, DEFAULT_GPS_TARGET_HZ)
 

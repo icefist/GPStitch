@@ -133,3 +133,42 @@ class TestPatchDjiMetaLoad:
         # Verify timeseries spans expected duration
         duration = (ts.max - ts.min).total_seconds()
         assert duration == pytest.approx(4.0, abs=1.0)  # 5 points, 1 second apart
+
+
+class TestFrozenClockFallback:
+    """A track spanning no time is unrenderable, and should say so.
+
+    The parser rebuilds a frozen clip's time axis, so the render patch should
+    never see a zero span. When it did, dividing the point count by a floored
+    one-second duration gave a sample_rate of 43917; and because Timeseries is
+    keyed by timestamp, no choice of sample_rate saves a track whose points all
+    share one instant. gopro-dashboard then reported only that the video and
+    the track "don't overlap in time".
+    """
+
+    def test_a_zero_span_track_is_refused_with_its_cause(self):
+        from dataclasses import replace as dc_replace
+
+        from gpstitch.patches.gpx_patches import patch_dji_meta_load
+
+        stamp = _make_dji_points(1)[0].timestamp
+        frozen = [dc_replace(p, timestamp=stamp) for p in _make_dji_points(5)]
+
+        with (
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta_file", return_value=frozen),
+            pytest.raises(ValueError, match="spans no time"),
+        ):
+            patch_dji_meta_load("/tmp/video.mp4")
+
+    def test_an_advancing_track_is_thinned_as_before(self):
+        from gpstitch.patches.gpx_patches import patch_dji_meta_load
+
+        with patch("gpstitch.services.dji_meta_parser.parse_dji_meta_file", return_value=_make_dji_points(5)):
+            patch_dji_meta_load("/tmp/video.mp4")
+
+        import gopro_overlay.loading as loading_module
+        from gopro_overlay import units as units_module
+
+        # 5 points one second apart is already the 1Hz target, so none are dropped.
+        timeseries = loading_module.load_external(Path("/tmp/whatever.gpx"), units_module.units)
+        assert len(timeseries) == 5
