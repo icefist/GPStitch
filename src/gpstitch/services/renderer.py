@@ -1098,22 +1098,25 @@ def _sample_dji_meta_for_frame(
         )
 
     # Dense window around the frame, so the values shown there are real rather
-    # than interpolated across a gap in the coarse sample. Whether the GPS clock
-    # is stuck is asked once, of the file, rather than inferred from this window:
-    # the answer depends on the window being longer than the clock's one-second
-    # resolution, which is not something a window should have to reason about.
-    # The coarse pass spans the whole clip, so it settles the question itself.
+    # than interpolated across a gap in the coarse sample. Whether the clock
+    # stalls is asked of the file rather than of this window, which may be too
+    # short to contain enough of a stall to recognise one. The coarse pass spans
+    # the whole clip and settles the question for itself.
+    #
+    # A rebuilt window is anchored on the coarse track's origin, so both land on
+    # one axis even where the clock had jumped hours ahead.
     points.extend(
         window(
             file_path,
             start_s=at_seconds - DJI_PREVIEW_WINDOW_S / 2,
             duration_s=DJI_PREVIEW_WINDOW_S,
             stream_index=stream_idx,
-            frozen_clock=frozen_check(
+            rebuild_clock=frozen_check(
                 file_path,
                 total_duration_s=total_duration_s or 0.0,
                 stream_index=stream_idx,
             ),
+            anchor_ts=points[0].timestamp if points else None,
         )
     )
 
@@ -1145,7 +1148,7 @@ def _load_dji_meta_for_preview(
     """
     from gpstitch.services.dji_meta_parser import (
         detect_dji_meta_stream,
-        dji_meta_clock_frozen,
+        dji_meta_clock_unreliable,
         parse_dji_meta_file,
         parse_dji_meta_window,
         sample_dji_meta_track,
@@ -1164,7 +1167,7 @@ def _load_dji_meta_for_preview(
             detect=detect_dji_meta_stream,
             window=parse_dji_meta_window,
             coarse=sample_dji_meta_track,
-            frozen_check=dji_meta_clock_frozen,
+            frozen_check=dji_meta_clock_unreliable,
         )
     if not points:
         raise ValueError(f"No valid GPS data found in DJI meta stream: {file_path}")

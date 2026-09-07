@@ -20,13 +20,14 @@ import pytest
 from gpstitch.services.dji_meta_parser import (
     _DEFAULT_SAMPLE_RATE_HZ,
     DjiMetaPoint,
-    dji_meta_clock_frozen,
+    clock_unreliable,
+    dji_meta_clock_unreliable,
+    parse_dji_meta_file,
     parse_dji_meta_window,
     position_frozen,
     read_declared_sample_rate,
     rebuild_timestamps,
     sample_dji_meta_track,
-    timestamps_frozen,
 )
 
 FROZEN = datetime(2026, 9, 6, 18, 25, 14)
@@ -72,27 +73,6 @@ def raw_with_declared_rate(rate: float | None) -> bytes:
     if rate is not None:
         device += _float_field(5, rate)
     return _submessage(3, _submessage(4, _submessage(1, device)))
-
-
-class TestFrozenDetection:
-    def test_identical_timestamps_are_frozen(self):
-        assert timestamps_frozen([point(0), point(1), point(2)]) is True
-
-    def test_advancing_timestamps_are_not_frozen(self):
-        points = [point(0), point(30, FROZEN + timedelta(seconds=1))]
-        assert timestamps_frozen(points) is False
-
-    def test_a_single_point_is_not_frozen(self):
-        """One point spans no time whatever its clock does - nothing to rebuild."""
-        assert timestamps_frozen([point(0)]) is False
-
-    def test_no_points_are_not_frozen(self):
-        assert timestamps_frozen([]) is False
-
-    def test_unsorted_points_are_still_recognised_as_advancing(self):
-        """parse_dji_meta returns stream order, which is not guaranteed sorted."""
-        points = [point(30, FROZEN + timedelta(seconds=1)), point(0, FROZEN)]
-        assert timestamps_frozen(points) is False
 
 
 class TestRebuildTimestamps:
@@ -173,19 +153,25 @@ class TestCoarseTrackRepair:
         return fake_extract, fake_parse
 
     def test_a_frozen_clip_gets_per_window_offsets(self, tmp_path):
-        extract, parse = self._extraction({0.0: [point(0), point(30)], 100.0: [point(0), point(30)]})
+        """Each window is placed by its own offset into the clip.
+
+        The windows carry ten seconds of samples each, since a handful of
+        repeated timestamps is the clock's one-second resolution rather than a
+        stall.
+        """
+        stalled = [point(i) for i in range(300)]
+        extract, parse = self._extraction({0.0: list(stalled), 100.0: list(stalled)})
         with (
             patch("gpstitch.services.dji_meta_parser.extract_dji_meta_raw", side_effect=extract),
             patch("gpstitch.services.dji_meta_parser.parse_dji_meta", side_effect=parse),
         ):
             points = sample_dji_meta_track(tmp_path / "v.mp4", total_duration_s=200.0, samples=2, stream_index=2)
 
-        assert [p.timestamp for p in points] == [
-            FROZEN,
-            FROZEN + timedelta(seconds=1),
-            FROZEN + timedelta(seconds=100),
-            FROZEN + timedelta(seconds=101),
-        ]
+        assert len(points) == 600
+        assert points[0].timestamp == FROZEN
+        assert points[299].timestamp == FROZEN + timedelta(seconds=299 / 30.0)
+        assert points[300].timestamp == FROZEN + timedelta(seconds=100)
+        assert points[-1].timestamp == FROZEN + timedelta(seconds=100 + 299 / 30.0)
 
     def test_a_healthy_clip_keeps_its_own_timestamps(self, tmp_path):
         """The regression that matters: a working clip must not be shifted.
@@ -234,7 +220,7 @@ class TestSingleWindow:
             points = parse_dji_meta_window(tmp_path / "v.mp4", start_s=240.0, duration_s=2.0, stream_index=2)
         assert [p.timestamp for p in points] == [FROZEN, FROZEN]
 
-    def test_a_frozen_clock_gets_the_window_offset(self, tmp_path):
+    def test_a_stalled_clock_gets_the_window_offset(self, tmp_path):
         extract, parse = self._patched([point(0), point(30)])
         with extract, parse:
             points = parse_dji_meta_window(
@@ -242,7 +228,7 @@ class TestSingleWindow:
                 start_s=240.0,
                 duration_s=2.0,
                 stream_index=2,
-                frozen_clock=True,
+                rebuild_clock=True,
             )
         assert [p.timestamp for p in points] == [
             FROZEN + timedelta(seconds=240),
@@ -250,20 +236,25 @@ class TestSingleWindow:
         ]
 
 
-class TestClockFrozenProbe:
-    """The question is whether the clock is stuck for the clip's whole length.
+class TestClockUnreliableProbe:
+    """The preview asks whether the clock stalls, from windows at both ends.
 
-    One real clip had its clock stuck for the first minutes and then recover, so
-    a window at the start alone is not enough: a rebuild driven by that answer
-    would shift the recovered section by the window's own offset. Two windows,
-    at the start and near the end, have to agree.
+    A stall is a long run of one timestamp, which a single window can see. Both
+    ends are probed because the stall can sit at either: one clip stalled for
+    its first 93% and resumed only in its last minute, while another was stuck
+    throughout.
     """
 
+    def _stall(self, n: int = 300) -> list[DjiMetaPoint]:
+        return [point(i) for i in range(n)]
+
+    def _healthy(self, base_s: int = 0, n: int = 300) -> list[DjiMetaPoint]:
+        return [point(i, FROZEN + timedelta(seconds=base_s + i // 30)) for i in range(n)]
+
     def _probe(self, per_start, tmp_path, total_duration_s=600.0):
-        """Drive the probe with canned results keyed by window start."""
         seen: list[tuple[float, float]] = []
 
-        def fake_window(file_path, *, start_s, duration_s, stream_index=None, frozen_clock=False):
+        def fake_window(file_path, *, start_s, duration_s, stream_index=None, rebuild_clock=False, anchor_ts=None):
             seen.append((start_s, duration_s))
             for key, points in per_start:
                 if key == start_s:
@@ -271,88 +262,63 @@ class TestClockFrozenProbe:
             return []
 
         with patch("gpstitch.services.dji_meta_parser.parse_dji_meta_window", side_effect=fake_window):
-            frozen = dji_meta_clock_frozen(
+            unreliable = dji_meta_clock_unreliable(
                 tmp_path / "v.mp4",
                 total_duration_s=total_duration_s,
                 stream_index=2,
             )
-        return frozen, seen
+        return unreliable, seen
 
-    def test_both_ends_stuck_on_one_timestamp_is_frozen(self, tmp_path):
-        frozen, seen = self._probe(
-            [(0.0, [point(0), point(1)]), (570.0, [point(0), point(1)])],
+    def test_a_stall_at_the_start_is_found(self, tmp_path):
+        unreliable, seen = self._probe([(0.0, self._stall())], tmp_path)
+        assert unreliable is True
+        assert len(seen) == 1, "a stall at the start settles it without a second read"
+
+    def test_a_stall_only_at_the_end_is_found(self, tmp_path):
+        """The real shape: healthy at the start, stalled by the end."""
+        unreliable, seen = self._probe(
+            [(0.0, self._healthy()), (570.0, self._stall())],
             tmp_path,
         )
-        assert frozen is True
-        assert seen[0][1] > 1.0, "the window must outrun the clock's one-second resolution"
-        assert any(start > 0.0 for start, _ in seen), "the tail of the clip must be checked too"
-
-    def test_a_clock_that_only_recovers_at_the_very_end_is_not_frozen(self, tmp_path):
-        """The real shape: one clip was stuck for 93% of its length.
-
-        Sampling at 80% of the clip landed inside the frozen stretch and called
-        the whole thing frozen, so the tail window has to sit at the very end.
-        """
-        recovered = [
-            point(26483, FROZEN + timedelta(seconds=14000)),
-            point(26513, FROZEN + timedelta(seconds=14001)),
-        ]
-        frozen, seen = self._probe(
-            [(0.0, [point(0), point(1)]), (570.0, recovered)],
-            tmp_path,
-            total_duration_s=600.0,
-        )
-        assert frozen is False
+        assert unreliable is True
         assert max(start for start, _ in seen) >= 540.0, "the tail window must reach the end of the clip"
 
-    def test_a_clock_that_recovers_later_is_not_frozen(self, tmp_path):
-        """The real case: stuck at the start, advancing by the end."""
-        late = [point(0, FROZEN + timedelta(seconds=400)), point(30, FROZEN + timedelta(seconds=401))]
-        frozen, _ = self._probe([(0.0, [point(0), point(1)]), (570.0, late)], tmp_path)
-        assert frozen is False
-
-    def test_a_tail_stuck_on_a_different_timestamp_is_not_frozen(self, tmp_path):
-        """Two stuck stretches at different values are not one frozen clock."""
-        late = [point(0, FROZEN + timedelta(seconds=400)), point(1, FROZEN + timedelta(seconds=400))]
-        frozen, _ = self._probe([(0.0, [point(0), point(1)]), (570.0, late)], tmp_path)
-        assert frozen is False
-
-    def test_an_advancing_start_needs_no_second_window(self, tmp_path):
-        frozen, seen = self._probe(
-            [(0.0, [point(0), point(30, FROZEN + timedelta(seconds=1))])],
+    def test_a_clip_healthy_at_both_ends_is_reliable(self, tmp_path):
+        unreliable, _ = self._probe(
+            [(0.0, self._healthy()), (570.0, self._healthy(base_s=560))],
             tmp_path,
         )
-        assert frozen is False
-        assert len(seen) == 1, "an advancing clock is settled by the first window"
+        assert unreliable is False
+
+    def test_granularity_is_not_mistaken_for_a_stall(self, tmp_path):
+        """A window holding two points on one timestamp is one-second resolution."""
+        unreliable, _ = self._probe([(0.0, [point(0), point(1)]), (570.0, [point(0), point(1)])], tmp_path)
+        assert unreliable is False
 
     def test_the_first_window_widens_when_gps_locked_late(self, tmp_path):
         attempts = []
 
-        def fake_window(file_path, *, start_s, duration_s, stream_index=None, frozen_clock=False):
+        def fake_window(file_path, *, start_s, duration_s, stream_index=None, rebuild_clock=False, anchor_ts=None):
             attempts.append((start_s, duration_s))
             if start_s == 0.0 and len(attempts) == 1:
                 return []
-            return [point(0), point(1)]
+            return [point(i) for i in range(300)]
 
         with patch("gpstitch.services.dji_meta_parser.parse_dji_meta_window", side_effect=fake_window):
-            frozen = dji_meta_clock_frozen(tmp_path / "v.mp4", total_duration_s=600.0, stream_index=2)
+            unreliable = dji_meta_clock_unreliable(tmp_path / "v.mp4", total_duration_s=600.0, stream_index=2)
 
-        assert frozen is True
+        assert unreliable is True
         assert attempts[1][1] > attempts[0][1], "the empty window should widen"
 
-    def test_a_clip_with_no_gps_at_all_is_not_called_frozen(self, tmp_path):
-        """No evidence of a freeze is not evidence of one."""
-        frozen, _ = self._probe([], tmp_path)
-        assert frozen is False
-
-    def test_an_empty_tail_window_is_not_called_frozen(self, tmp_path):
-        frozen, _ = self._probe([(0.0, [point(0), point(1)])], tmp_path)
-        assert frozen is False
+    def test_a_clip_with_no_gps_at_all_is_reliable(self, tmp_path):
+        """No evidence of a stall is not evidence of one."""
+        unreliable, _ = self._probe([], tmp_path)
+        assert unreliable is False
 
     def test_an_unknown_duration_cannot_be_judged(self, tmp_path):
-        frozen, seen = self._probe([(0.0, [point(0), point(1)])], tmp_path, total_duration_s=0.0)
-        assert frozen is False
-        assert seen == [], "without a duration there is no tail to compare against"
+        unreliable, seen = self._probe([(0.0, self._stall())], tmp_path, total_duration_s=0.0)
+        assert unreliable is False
+        assert seen == [], "without a duration there is no window to place"
 
 
 class TestPreviewSampling:
@@ -363,12 +329,12 @@ class TestPreviewSampling:
 
         told: list[bool] = []
 
-        def fake_window(file_path, *, start_s, duration_s, stream_index=None, frozen_clock=False):
-            told.append(frozen_clock)
+        def fake_window(file_path, *, start_s, duration_s, stream_index=None, rebuild_clock=False, anchor_ts=None):
+            told.append((rebuild_clock, anchor_ts))
             # Mirror the real function: only a told window rebuilds its own axis.
             points = [point(0), point(30)]
-            if frozen_clock:
-                return rebuild_timestamps(points, sample_rate_hz=30.0, start_offset_s=start_s)
+            if rebuild_clock:
+                return rebuild_timestamps(points, sample_rate_hz=30.0, start_offset_s=start_s, anchor_ts=anchor_ts)
             return points
 
         def fake_coarse(file_path, *, total_duration_s, stream_index=None):
@@ -386,13 +352,18 @@ class TestPreviewSampling:
         )
         return points, told
 
-    def test_the_dense_window_is_told_when_the_clock_is_frozen(self, tmp_path):
+    def test_the_dense_window_is_told_when_the_clock_stalls(self, tmp_path):
         _, told = self._sample(True, tmp_path)
-        assert told == [True]
+        assert [flag for flag, _ in told] == [True]
+
+    def test_the_dense_window_shares_the_coarse_anchor(self, tmp_path):
+        """Both must land on one axis, or a jumped stretch drags the window away."""
+        _, told = self._sample(True, tmp_path)
+        assert [anchor for _, anchor in told] == [FROZEN]
 
     def test_the_dense_window_is_left_alone_when_the_clock_advances(self, tmp_path):
         _, told = self._sample(False, tmp_path)
-        assert told == [False]
+        assert [flag for flag, _ in told] == [False]
 
     def test_a_frozen_clip_keeps_its_dense_window_points(self, tmp_path):
         """Merged points are deduped by timestamp, so an unrebuilt dense window
@@ -449,3 +420,182 @@ class TestPositionFrozen:
 
     def test_no_points_are_not_judged(self):
         assert position_frozen([]) is False
+
+
+class TestClockUnreliable:
+    """A clock that stalls for a long stretch cannot be trusted anywhere.
+
+    One clip stalled for 26483 of its 28344 samples and then resumed roughly
+    four hours ahead of where it stopped, so its 30 distinct timestamps claimed
+    a four-hour track for a 16-minute video. Timeseries is keyed by datetime, so
+    that rendered as 30 GPS points.
+
+    Timestamps carry one-second resolution, so a healthy clip repeats each value
+    for about one sample rate's worth of samples. A run far longer than that is
+    a stalled clock, and it is detectable locally - unlike "every timestamp is
+    identical", which a short window cannot tell from ordinary granularity.
+    """
+
+    def _stalled(self, run_length: int, then: int = 60) -> list[DjiMetaPoint]:
+        points = [point(i) for i in range(run_length)]
+        points += [point(run_length + i, FROZEN + timedelta(seconds=14000 + i // 30)) for i in range(then)]
+        return points
+
+    def test_a_healthy_clock_is_reliable(self):
+        """One second of samples per timestamp at 30Hz is normal."""
+        points = [point(i, FROZEN + timedelta(seconds=i // 30)) for i in range(300)]
+        assert clock_unreliable(points, sample_rate_hz=30.0) is False
+
+    def test_a_fully_frozen_clock_is_unreliable(self):
+        assert clock_unreliable([point(i) for i in range(300)], sample_rate_hz=30.0) is True
+
+    def test_a_long_stall_followed_by_a_jump_is_unreliable(self):
+        """The real shape: stalled for most of the clip, then resumed elsewhere."""
+        assert clock_unreliable(self._stalled(900), sample_rate_hz=30.0) is True
+
+    def test_a_stall_within_the_clock_resolution_is_reliable(self):
+        """Two seconds on one value is granularity, not a stall."""
+        points = [point(i) for i in range(60)]
+        points += [point(60 + i, FROZEN + timedelta(seconds=1 + i // 30)) for i in range(120)]
+        assert clock_unreliable(points, sample_rate_hz=30.0) is False
+
+    def test_a_gap_in_coverage_is_not_a_stall(self):
+        """GPS dropping out leaves missing samples, not repeated timestamps.
+
+        Rebuilding here would compress two real segments together, so this must
+        stay reliable.
+        """
+        early = [point(i, FROZEN + timedelta(seconds=i // 30)) for i in range(300)]
+        late = [point(20000 + i, FROZEN + timedelta(seconds=600 + i // 30)) for i in range(300)]
+        assert clock_unreliable(early + late, sample_rate_hz=30.0) is False
+
+    def test_too_few_points_to_judge(self):
+        assert clock_unreliable([point(0)], sample_rate_hz=30.0) is False
+        assert clock_unreliable([], sample_rate_hz=30.0) is False
+
+    def test_a_missing_rate_falls_back_to_the_default(self):
+        long_run = [point(i) for i in range(int(_DEFAULT_SAMPLE_RATE_HZ * 10))]
+        assert clock_unreliable(long_run, sample_rate_hz=None) is True
+
+
+class TestRebuildAnchor:
+    """Windows taken from different offsets have to land on one axis."""
+
+    def test_an_explicit_anchor_overrides_the_first_point(self):
+        anchor = FROZEN - timedelta(seconds=100)
+        rebuilt = rebuild_timestamps(
+            [point(0), point(30)],
+            sample_rate_hz=30.0,
+            start_offset_s=240.0,
+            anchor_ts=anchor,
+        )
+        assert rebuilt[0].timestamp == anchor + timedelta(seconds=240)
+        assert rebuilt[1].timestamp == anchor + timedelta(seconds=241)
+
+    def test_without_an_anchor_the_first_point_is_used(self):
+        rebuilt = rebuild_timestamps([point(0), point(30)], sample_rate_hz=30.0)
+        assert rebuilt[0].timestamp == FROZEN
+
+
+class TestFullParseUsesReliability:
+    """The render path rebuilds whenever the clock stalls, not only when it never moves."""
+
+    def _patched(self, points, rate=30.0):
+        return (
+            patch(
+                "gpstitch.services.dji_meta_parser.extract_dji_meta_raw",
+                return_value=raw_with_declared_rate(rate),
+            ),
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta", return_value=points),
+            patch("gpstitch.services.dji_meta_parser.detect_dji_meta_stream", return_value=2),
+        )
+
+    def test_a_stalled_clock_that_jumps_is_rebuilt(self, tmp_path):
+        """The real clip: stalled for most of its length, then four hours ahead.
+
+        Left alone, 30 distinct timestamps claimed a four-hour track for a
+        16-minute video and Timeseries kept only 30 points.
+        """
+        stalled = [point(i) for i in range(900)]
+        stalled += [point(900 + i, FROZEN + timedelta(seconds=14000 + i // 30)) for i in range(60)]
+
+        extract, parse, detect = self._patched(stalled)
+        with extract, parse, detect:
+            points = parse_dji_meta_file(tmp_path / "v.mp4")
+
+        span = (points[-1].timestamp - points[0].timestamp).total_seconds()
+        assert span == pytest.approx(959 / 30.0, abs=0.01), "the axis should follow the sample index"
+        assert len({p.timestamp for p in points}) == len(points), "every sample gets its own instant"
+
+    def test_a_healthy_clock_is_left_alone(self, tmp_path):
+        healthy = [point(i, FROZEN + timedelta(seconds=i // 30)) for i in range(300)]
+
+        extract, parse, detect = self._patched(healthy)
+        with extract, parse, detect:
+            points = parse_dji_meta_file(tmp_path / "v.mp4")
+
+        assert [p.timestamp for p in points] == [p.timestamp for p in healthy]
+
+    def test_a_gap_in_coverage_is_preserved(self, tmp_path):
+        """Rebuilding here would compress two real segments together."""
+        early = [point(i, FROZEN + timedelta(seconds=i // 30)) for i in range(300)]
+        late = [point(20000 + i, FROZEN + timedelta(seconds=600 + i // 30)) for i in range(300)]
+
+        extract, parse, detect = self._patched(early + late)
+        with extract, parse, detect:
+            points = parse_dji_meta_file(tmp_path / "v.mp4")
+
+        span = (points[-1].timestamp - points[0].timestamp).total_seconds()
+        assert span == pytest.approx(609.0, abs=1.0), "the real gap must survive"
+
+
+class TestCoarseTrackAnchoring:
+    """Coarse windows must land on one axis even when the clock jumped mid-clip.
+
+    Anchoring each window on its own first timestamp breaks down once one window
+    sits in a stretch where the clock had jumped hours ahead: that window lands
+    hours away from its neighbours. Every window is anchored on the clip's first
+    timestamp instead, so the axis stays the sample index throughout.
+    """
+
+    def _extraction(self, per_window, rate=30.0):
+        calls: list[float] = []
+
+        def fake_extract(file_path, stream_index, *, start_s=None, duration_s=None):
+            calls.append(start_s or 0.0)
+            return raw_with_declared_rate(rate)
+
+        def fake_parse(raw):
+            return list(per_window[calls[-1]])
+
+        return fake_extract, fake_parse
+
+    def test_a_window_in_a_jumped_stretch_is_pulled_onto_the_axis(self, tmp_path):
+        stalled = [point(i) for i in range(300)]
+        jumped = [point(i, FROZEN + timedelta(seconds=14000 + i // 30)) for i in range(300)]
+
+        extract, parse = self._extraction({0.0: stalled, 100.0: jumped})
+        with (
+            patch("gpstitch.services.dji_meta_parser.extract_dji_meta_raw", side_effect=extract),
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta", side_effect=parse),
+        ):
+            points = sample_dji_meta_track(tmp_path / "v.mp4", total_duration_s=200.0, samples=2, stream_index=2)
+
+        span = (points[-1].timestamp - points[0].timestamp).total_seconds()
+        assert span < 200.0, f"windows should sit inside the clip, not hours apart (got {span}s)"
+        assert points[0].timestamp == FROZEN
+        assert points[-1].timestamp == FROZEN + timedelta(seconds=100 + 299 / 30.0)
+
+    def test_a_healthy_coarse_track_is_untouched(self, tmp_path):
+        early = [point(i, FROZEN + timedelta(seconds=i // 30)) for i in range(300)]
+        late = [point(i, FROZEN + timedelta(seconds=100 + i // 30)) for i in range(300)]
+
+        extract, parse = self._extraction({0.0: early, 100.0: late})
+        with (
+            patch("gpstitch.services.dji_meta_parser.extract_dji_meta_raw", side_effect=extract),
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta", side_effect=parse),
+        ):
+            points = sample_dji_meta_track(tmp_path / "v.mp4", total_duration_s=200.0, samples=2, stream_index=2)
+
+        assert points[0].timestamp == FROZEN
+        assert points[-1].timestamp == FROZEN + timedelta(seconds=109)

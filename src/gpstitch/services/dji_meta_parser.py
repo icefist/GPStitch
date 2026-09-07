@@ -367,16 +367,37 @@ def read_declared_sample_rate(raw_data: bytes) -> float | None:
     return None
 
 
-def timestamps_frozen(points: list[DjiMetaPoint]) -> bool:
-    """Whether every point carries the same timestamp, leaving the track spanning no time.
+# How long the clock may sit on one value before it counts as stalled. A healthy
+# stream repeats each value for about one sample rate's worth of samples, since
+# the timestamps carry one-second resolution; five times that is comfortably
+# beyond granularity and well short of a real stall.
+_MAX_STUCK_RUN_S = 5.0
 
-    Some clips off a DJI AC003 never advance the GPS clock - one had all 43917
-    samples stamped 18:25:14. gopro-dashboard then finds no overlap between the
-    track and the video's own date range and refuses to render.
+
+def clock_unreliable(points: list[DjiMetaPoint], *, sample_rate_hz: float | None) -> bool:
+    """Whether the GPS clock stalls for long enough to be untrustworthy.
+
+    One clip stalled for 26483 of its 28344 samples and then resumed about four
+    hours ahead, so its timestamps claimed a four-hour track for a 16-minute
+    video. Timeseries is keyed by datetime, which left 30 usable points.
+
+    Judged on the longest run of consecutive identical timestamps, which is a
+    local signal and does not confuse a stall with a gap in coverage: GPS
+    dropping out leaves samples missing, not repeated. Rebuilding a genuine gap
+    would compress two real segments together, so that distinction matters.
     """
     if len(points) < 2:
         return False
-    return min(p.timestamp for p in points) == max(p.timestamp for p in points)
+
+    rate = sample_rate_hz if sample_rate_hz and sample_rate_hz > 0 else _DEFAULT_SAMPLE_RATE_HZ
+    limit = _MAX_STUCK_RUN_S * rate
+
+    longest = run = 1
+    for previous, current in zip(points, points[1:], strict=False):
+        run = run + 1 if current.timestamp == previous.timestamp else 1
+        longest = max(longest, run)
+
+    return longest > limit
 
 
 # A fix that wobbles inside this much has not gone anywhere: 1e-5 degrees is
@@ -406,51 +427,70 @@ def rebuild_timestamps(
     *,
     sample_rate_hz: float | None,
     start_offset_s: float = 0.0,
+    anchor_ts: datetime | None = None,
 ) -> list[DjiMetaPoint]:
-    """Rebuild a frozen clip's time axis from the sample index.
+    """Rebuild an untrustworthy clip's time axis from the sample index.
 
     Anchored on the first point's own frame index, not on frame zero: callers
     derive the video's start time by subtracting that index from the first
     timestamp, so moving the first point would count a GPS lock delay twice.
 
     `start_offset_s` places a window taken from part-way through the stream,
-    where frame indices restart at zero.
+    where frame indices restart at zero. `anchor_ts` overrides the first point's
+    timestamp as the axis origin, so windows from different offsets - one of
+    which may sit in a stretch where the clock had jumped - still land on one
+    coherent axis.
     """
     if not points:
         return points
 
     rate = sample_rate_hz if sample_rate_hz and sample_rate_hz > 0 else _DEFAULT_SAMPLE_RATE_HZ
     base_idx = points[0].frame_idx
-    base_ts = points[0].timestamp + timedelta(seconds=start_offset_s)
+    base_ts = (anchor_ts if anchor_ts is not None else points[0].timestamp) + timedelta(seconds=start_offset_s)
     return [dc_replace(p, timestamp=base_ts + timedelta(seconds=(p.frame_idx - base_idx) / rate)) for p in points]
 
 
-def _repaired(raw: bytes, points: list[DjiMetaPoint], *, start_offset_s: float = 0.0) -> list[DjiMetaPoint]:
+def _repaired(
+    raw: bytes,
+    points: list[DjiMetaPoint],
+    *,
+    start_offset_s: float = 0.0,
+    anchor_ts: datetime | None = None,
+) -> list[DjiMetaPoint]:
     """Rebuild `points` off the rate `raw` declares for itself."""
-    return rebuild_timestamps(points, sample_rate_hz=read_declared_sample_rate(raw), start_offset_s=start_offset_s)
+    return rebuild_timestamps(
+        points,
+        sample_rate_hz=read_declared_sample_rate(raw),
+        start_offset_s=start_offset_s,
+        anchor_ts=anchor_ts,
+    )
 
 
-# The tail probe sits at the very end of the clip. One clip had its clock stuck
-# for the first 93% and recovered only in its last minute, so sampling anywhere
-# short of the end landed inside the frozen stretch and mistook it for the whole.
+# The second probe sits at the very end of the clip, to catch a clock that runs
+# cleanly at the start and stalls later. Sampling short of the end would miss it.
 _PROBE_TAIL_WINDOW_S = 30.0
 
 
-def dji_meta_clock_frozen(
+def dji_meta_clock_unreliable(
     file_path: Path,
     *,
     total_duration_s: float,
     stream_index: int | None = None,
 ) -> bool:
-    """Whether this clip's GPS clock stands still for its whole length.
+    """Whether this clip's GPS clock stalls, judged from windows at both ends.
 
-    Timestamps carry one-second resolution, so a probe window has to be
-    comfortably longer than a second for an advancing clock to show up in it.
+    A stall is a long run of one timestamp, and that shows up inside a single
+    window - unlike "every timestamp is identical", which a short window cannot
+    tell apart from the clock's one-second granularity.
 
-    A window at the start is not enough on its own: one clip had its clock stuck
-    for the first minutes and then recover, and rebuilding on that answer would
-    shift the recovered section by a window's own offset. So the start and the
-    tail have to agree - both stuck, on the same value.
+    Both ends are probed because the stall can sit at either: one clip stalled
+    for its first 93% and resumed only in its last minute. A stall confined to
+    the middle is missed here; the full parse behind a render sees the whole
+    stream and catches it there.
+
+    The threshold scales with the declared sample rate, which a window does not
+    carry, so the default rate is assumed - it only sets how many repeated
+    samples count as a stall.
     """
     if total_duration_s <= 0:
         return False
@@ -462,8 +502,8 @@ def dji_meta_clock_frozen(
         if len(at_start) >= 2:
             break
 
-    if len(at_start) < 2 or not timestamps_frozen(at_start):
-        return False
+    if clock_unreliable(at_start, sample_rate_hz=None):
+        return True
 
     at_tail = parse_dji_meta_window(
         file_path,
@@ -471,10 +511,7 @@ def dji_meta_clock_frozen(
         duration_s=_PROBE_TAIL_WINDOW_S,
         stream_index=stream_index,
     )
-    if len(at_tail) < 2 or not timestamps_frozen(at_tail):
-        return False
-
-    return at_tail[0].timestamp == at_start[0].timestamp
+    return clock_unreliable(at_tail, sample_rate_hz=None)
 
 
 def parse_dji_meta_window(
@@ -483,22 +520,24 @@ def parse_dji_meta_window(
     start_s: float,
     duration_s: float,
     stream_index: int | None = None,
-    frozen_clock: bool = False,
+    rebuild_clock: bool = False,
+    anchor_ts: datetime | None = None,
 ) -> list[DjiMetaPoint]:
     """GPS points from a slice of the stream around `start_s`.
 
-    A window shorter than the clock's one-second resolution cannot tell a frozen
-    clock from ordinary granularity, so `frozen_clock` has to be established by
-    the caller - see `dji_meta_clock_frozen`.
+    `rebuild_clock` has to be established by the caller - see
+    `dji_meta_clock_unreliable` - because a window this short may not contain
+    enough of a stall to recognise one. `anchor_ts` keeps the rebuilt window on
+    the same axis as the rest of the track.
     """
     idx = stream_index if stream_index is not None else detect_dji_meta_stream(file_path)
     if idx is None:
         return []
     raw = extract_dji_meta_raw(file_path, idx, start_s=max(0.0, start_s), duration_s=duration_s)
     points = parse_dji_meta(raw)
-    if frozen_clock and points:
+    if rebuild_clock and points:
         logger.debug("Rebuilding %d timestamps for the window at %.1fs", len(points), start_s)
-        return _repaired(raw, points, start_offset_s=max(0.0, start_s))
+        return _repaired(raw, points, start_offset_s=max(0.0, start_s), anchor_ts=anchor_ts)
     return points
 
 
@@ -568,13 +607,21 @@ def sample_dji_meta_track(
 
     points = [p for _, _, window_points in windows for p in window_points]
 
-    # Windows spread across the whole clip agreeing on a single timestamp means
-    # the clock never moved, and each window's own offset is what orders them.
-    # One window on its own proves nothing: it can be shorter than the clock's
-    # one-second resolution.
-    if len(windows) > 1 and timestamps_frozen(points):
-        logger.info("DJI meta clock frozen at %s in %s; rebuilding from sample rate", points[0].timestamp, file_path)
-        points = [p for start_s, raw, wp in windows for p in _repaired(raw, wp, start_offset_s=start_s)]
+    # A clock that stalls across windows taken from all over the clip is not
+    # telling us where they belong; each window's own offset is. One window on
+    # its own proves nothing - it can be shorter than the stall threshold.
+    #
+    # Every window is anchored on the clip's first timestamp rather than its own,
+    # because a window landing in a stretch where the clock had jumped would
+    # otherwise sit hours away from its neighbours.
+    if len(windows) > 1 and clock_unreliable(points, sample_rate_hz=read_declared_sample_rate(windows[0][1])):
+        anchor = windows[0][2][0].timestamp
+        logger.info("DJI meta clock stalls in %s; rebuilding coarse windows from %s", file_path, anchor)
+        points = [
+            p
+            for start_s, raw, window_points in windows
+            for p in _repaired(raw, window_points, start_offset_s=start_s, anchor_ts=anchor)
+        ]
 
     points.sort(key=lambda p: p.timestamp)
     return points
@@ -634,12 +681,12 @@ def parse_dji_meta_file(file_path: Path) -> list[DjiMetaPoint]:
 
     raw_data = extract_dji_meta_raw(file_path, stream_idx)
     points = parse_dji_meta(raw_data)
-    if timestamps_frozen(points):
+    if clock_unreliable(points, sample_rate_hz=read_declared_sample_rate(raw_data)):
         logger.info(
-            "DJI meta clock frozen at %s across all %d points in %s; rebuilding from sample rate",
-            points[0].timestamp,
-            len(points),
+            "DJI meta clock stalls in %s (%d points, first stamped %s); rebuilding from the sample rate",
             file_path.name,
+            len(points),
+            points[0].timestamp,
         )
         return _repaired(raw_data, points)
     return points
