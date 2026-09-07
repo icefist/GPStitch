@@ -93,6 +93,10 @@ class Job(BaseModel):
     error: str | None = None
     pid: int | None = None
     batch_id: str | None = None  # Groups jobs from same batch
+    # The server process that owns this job. Jobs live in a state dir shared by
+    # every process on the machine, so a restart sweep has to know whose job it
+    # is looking at. None means the file predates this field.
+    owner_pid: int | None = None
 
     def is_terminal(self) -> bool:
         """Check if job is in a terminal state."""

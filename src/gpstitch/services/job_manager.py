@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,27 @@ from gpstitch.config import settings
 from gpstitch.models.job import Job, JobStatus, JobType, RenderJobConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _owner_is_alive(job: Job) -> bool:
+    """Whether the process that created this job is still running.
+
+    A job with no owner predates the field, and there is nothing to check: the
+    conservative sweep applies to it, as it always did.
+
+    Pid reuse could in principle make a dead owner look alive, which would leave
+    a job stuck as RUNNING rather than failing it. That is the safer way round.
+    """
+    if job.owner_pid is None:
+        return False
+    try:
+        os.kill(job.owner_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Alive, just owned by another user.
+        return True
+    return True
 
 
 class JobManager:
@@ -41,6 +63,13 @@ class JobManager:
                 job_data = json.loads(job_file.read_text(encoding="utf-8"))
                 job = Job.model_validate(job_data)
                 self._jobs[job.id] = job
+
+                # Someone else is still running this one. The state dir is shared
+                # by every process on the machine, so without this check merely
+                # importing this module - a test run, a CLI call, a second server
+                # - declared another server's live render dead.
+                if _owner_is_alive(job):
+                    continue
 
                 # Mark previously running jobs as failed (server restart)
                 if job.status == JobStatus.RUNNING:
@@ -75,6 +104,7 @@ class JobManager:
                 status=JobStatus.PENDING,
                 config=config,
                 created_at=datetime.now(UTC),
+                owner_pid=os.getpid(),
             )
 
             self._jobs[job.id] = job
@@ -227,6 +257,7 @@ class JobManager:
                 config=config,
                 created_at=datetime.now(UTC),
                 batch_id=batch_id,
+                owner_pid=os.getpid(),
             )
 
             self._jobs[job.id] = job

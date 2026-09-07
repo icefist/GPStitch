@@ -366,12 +366,24 @@ class TestJobManagerPersistence:
         assert any("→" in line for line in restored.log_lines)
 
     async def test_running_job_marked_failed_on_restart(self, clean_job_manager, sample_job_config, temp_dir):
-        """Running jobs should be marked as failed on restart."""
+        """Running jobs should be marked as failed on restart.
+
+        A restart means the owning process is gone. Constructing a second manager
+        inside this one is not that - the owner is still very much alive - so the
+        job's owner is pointed at a process that has exited.
+        """
+        import subprocess
+
         from gpstitch.services.job_manager import JobManager
 
         job = await clean_job_manager.create_job(sample_job_config)
         await clean_job_manager.update_job_status(job.id, JobStatus.RUNNING)
         job_id = job.id
+
+        exited = subprocess.Popen(["true"])
+        exited.wait()
+        job.owner_pid = exited.pid
+        clean_job_manager._persist_job(job)
 
         # Create new manager (simulates restart)
         new_manager = JobManager(state_dir=clean_job_manager.state_dir)
@@ -380,3 +392,108 @@ class TestJobManagerPersistence:
 
         assert restored.status == JobStatus.FAILED
         assert "restarted" in restored.error.lower()
+
+
+class TestRestartSweepRespectsTheOwner:
+    """Only the process that owned a job may declare it orphaned.
+
+    JobManager is constructed at import time against a shared state dir, so any
+    second process - a test run, a CLI call, a second server - used to rewrite a
+    live server's RUNNING job to FAILED just by importing the module. That was
+    reachable in practice: running the test suite during a real render marked it
+    failed on disk.
+    """
+
+    def _write_job(self, state_dir, status, owner_pid, session_id="s1"):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from gpstitch.models.job import Job, RenderJobConfig
+
+        job = Job(
+            id=str(uuid4()),
+            status=status,
+            config=RenderJobConfig(session_id=session_id, layout="default-1920x1080", output_file="/tmp/o.mp4"),
+            created_at=datetime.now(UTC),
+            owner_pid=owner_pid,
+        )
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / f"{job.id}.json").write_text(job.model_dump_json(), encoding="utf-8")
+        return job.id
+
+    def _dead_pid(self):
+        """A pid that has certainly exited."""
+        import subprocess
+
+        process = subprocess.Popen(["true"])
+        process.wait()
+        return process.pid
+
+    def _load(self, state_dir):
+        from gpstitch.services.job_manager import JobManager
+
+        return JobManager(state_dir=state_dir)
+
+    def test_a_running_job_owned_by_a_live_process_is_left_alone(self, temp_dir):
+        import os
+
+        from gpstitch.models.job import JobStatus
+
+        state_dir = temp_dir / "jobs"
+        job_id = self._write_job(state_dir, JobStatus.RUNNING, owner_pid=os.getpid())
+
+        manager = self._load(state_dir)
+
+        assert manager._jobs[job_id].status == JobStatus.RUNNING
+
+    def test_a_running_job_whose_owner_died_is_failed(self, temp_dir):
+        from gpstitch.models.job import JobStatus
+
+        state_dir = temp_dir / "jobs"
+        job_id = self._write_job(state_dir, JobStatus.RUNNING, owner_pid=self._dead_pid())
+
+        manager = self._load(state_dir)
+
+        assert manager._jobs[job_id].status == JobStatus.FAILED
+        assert "restart" in (manager._jobs[job_id].error or "").lower()
+
+    def test_a_running_job_from_before_this_field_existed_is_failed(self, temp_dir):
+        """Legacy files carry no owner, so the old conservative sweep applies."""
+        from gpstitch.models.job import JobStatus
+
+        state_dir = temp_dir / "jobs"
+        job_id = self._write_job(state_dir, JobStatus.RUNNING, owner_pid=None)
+
+        manager = self._load(state_dir)
+
+        assert manager._jobs[job_id].status == JobStatus.FAILED
+
+    def test_a_pending_local_job_owned_by_a_live_process_is_left_alone(self, temp_dir):
+        """Its in-memory session belongs to the owner, not to us."""
+        import os
+
+        from gpstitch.models.job import JobStatus
+
+        state_dir = temp_dir / "jobs"
+        job_id = self._write_job(state_dir, JobStatus.PENDING, owner_pid=os.getpid(), session_id="local:abc")
+
+        manager = self._load(state_dir)
+
+        assert manager._jobs[job_id].status == JobStatus.PENDING
+
+    def test_a_pending_local_job_whose_owner_died_is_failed(self, temp_dir):
+        from gpstitch.models.job import JobStatus
+
+        state_dir = temp_dir / "jobs"
+        job_id = self._write_job(state_dir, JobStatus.PENDING, owner_pid=self._dead_pid(), session_id="local:abc")
+
+        manager = self._load(state_dir)
+
+        assert manager._jobs[job_id].status == JobStatus.FAILED
+
+    async def test_a_new_job_records_this_process_as_its_owner(self, clean_job_manager, sample_job_config):
+        import os
+
+        job = await clean_job_manager.create_job(sample_job_config)
+
+        assert job.owner_pid == os.getpid()

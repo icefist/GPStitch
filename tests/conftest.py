@@ -1,14 +1,22 @@
 """Pytest configuration and fixtures."""
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
-import pytest
-from httpx import ASGITransport, AsyncClient
+# Point every gpstitch import at a throwaway state dir, before gpstitch.config
+# builds its Settings. The job store otherwise lives in a machine-wide temp dir
+# shared with any running server: a test run littered it (768 job files had
+# piled up) and read back the live server's jobs.
+_TEST_STATE_DIR = Path(tempfile.mkdtemp(prefix="gpstitch-tests-"))
+os.environ.setdefault("GPSTITCH_TEMP_DIR", str(_TEST_STATE_DIR))
 
-from gpstitch.app import app
-from tests.fixtures.factories import (
+import pytest  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from gpstitch.app import app  # noqa: E402
+from tests.fixtures.factories import (  # noqa: E402
     create_editor_layout,
     create_file_info,
     create_gpx_fit_metadata,
@@ -17,6 +25,11 @@ from tests.fixtures.factories import (
     create_video_metadata,
     create_widget_instance,
 )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Remove the throwaway state dir this session created."""
+    shutil.rmtree(_TEST_STATE_DIR, ignore_errors=True)
 
 
 def pytest_collection_modifyitems(items):
