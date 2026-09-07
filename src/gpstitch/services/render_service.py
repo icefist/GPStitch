@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import re
@@ -32,6 +33,26 @@ class RenderService:
         self._process: asyncio.subprocess.Process | None = None
         self._current_job_id: str | None = None
         self._lock = asyncio.Lock()
+        # Set while a job is building its command - reading the GPS stream and
+        # writing a GPX takes minutes, and there is no subprocess to signal yet.
+        self._preparing_job_id: str | None = None
+        self._cancelled_while_preparing: set[str] = set()
+
+    def _discard_preparation(
+        self,
+        temp_files: list[str],
+        pillarbox_temp_file: str | None = None,
+        restore_mtime_info: tuple[str, float, float] | None = None,
+    ) -> None:
+        """Undo the work done for a job that will not be rendered after all."""
+        if restore_mtime_info:
+            path, atime, mtime = restore_mtime_info
+            with contextlib.suppress(OSError):
+                os.utime(path, (atime, mtime))
+        if pillarbox_temp_file:
+            self._cleanup_temp_file(pillarbox_temp_file)
+        for temp_file in temp_files:
+            self._cleanup_temp_file(temp_file)
 
     async def _kill_process_tree(self):
         """Kill the current process and all its children (ffmpeg, etc.)."""
@@ -130,15 +151,18 @@ class RenderService:
             and not secondary
         ):
             try:
-                from gpstitch.services.dji_meta_parser import parse_dji_meta_file
+                # Only the first point is needed. Parsing the whole stream to reach
+                # it seeks through the entire file - 107s on a 12GB clip - and
+                # generate_cli_command has already paid that once for the GPX.
+                from gpstitch.services.dji_meta_parser import first_dji_meta_point
 
-                points = parse_dji_meta_file(Path(video_path))
-                if points:
-                    first_gps_ts = points[0].timestamp.replace(tzinfo=UTC).timestamp()
+                first = first_dji_meta_point(Path(video_path))
+                if first is not None:
+                    first_gps_ts = first.timestamp.replace(tzinfo=UTC).timestamp()
                     # Account for GPS lock delay: if GPS locked after recording
-                    # started, points[0].frame_idx > 0. Subtract the frame offset
-                    # so mtime reflects the actual video start, not the first GPS fix.
-                    frame_idx = points[0].frame_idx
+                    # started, frame_idx > 0. Subtract the frame offset so mtime
+                    # reflects the actual video start, not the first GPS fix.
+                    frame_idx = first.frame_idx
                     if frame_idx > 0 and primary.video_metadata is not None:
                         fps = primary.video_metadata.frame_rate
                         if fps > 0:
@@ -329,11 +353,34 @@ class RenderService:
             async with self._lock:
                 self._process = None
                 self._current_job_id = None
+                self._preparing_job_id = None
+            self._cancelled_while_preparing.discard(job_id)
             await self._start_next_pending_job()
 
-        # Generate CLI command
+        # Preparation reads the whole GPS stream and writes a GPX - minutes on a
+        # large clip. Mark the job running and narrate it, so the UI is not left
+        # staring at a pending job with an empty log.
+        await job_manager.update_job_status(job_id, JobStatus.RUNNING)
+        await job_manager.append_job_log(job_id, "=== Preparing ===")
+
+        loop = asyncio.get_running_loop()
+
+        def on_progress(message: str) -> None:
+            """Forward a progress line from the worker thread into the job log."""
+            future = asyncio.run_coroutine_threadsafe(job_manager.append_job_log(job_id, message), loop)
+            with contextlib.suppress(Exception):
+                future.result(timeout=5.0)
+
+        # Generate CLI command off the event loop: it is synchronous and slow, and
+        # blocking here would stall status polling, log fetches and cancellation.
+        async with self._lock:
+            self._preparing_job_id = job_id
         try:
-            command, srt_gpx_temp_files = generate_cli_command(
+            command, srt_gpx_temp_files = await asyncio.to_thread(
+                functools.partial(
+                    generate_cli_command,
+                    on_progress=on_progress,
+                ),
                 session_id=config.session_id,
                 output_file=config.output_file,
                 layout=config.layout,
@@ -355,6 +402,15 @@ class RenderService:
             await job_manager.append_job_log(job_id, f"ERROR: {error_msg}")
             await job_manager.update_job_status(job_id, JobStatus.FAILED, error_msg)
             logger.error(f"Failed to generate command for job {job_id}: {e}")
+            await _clear_current_job()
+            return
+
+        # A cancel that arrived during preparation could not signal a subprocess,
+        # so it is honoured here instead - before anything is launched.
+        if job_id in self._cancelled_while_preparing:
+            await job_manager.append_job_log(job_id, "Cancelled before rendering started")
+            self._discard_preparation(srt_gpx_temp_files)
+            logger.info(f"Job {job_id} cancelled during preparation")
             await _clear_current_job()
             return
 
@@ -455,6 +511,15 @@ class RenderService:
             await _clear_current_job()
             return
 
+        # Last chance to honour a cancel: from here on there is a subprocess to
+        # signal, and cancel_render takes the normal kill path.
+        if job_id in self._cancelled_while_preparing:
+            await job_manager.append_job_log(job_id, "Cancelled before rendering started")
+            self._discard_preparation(srt_gpx_temp_files, pillarbox_temp_file, restore_mtime_info)
+            logger.info(f"Job {job_id} cancelled before launch")
+            await _clear_current_job()
+            return
+
         logger.info(f"Starting render job {job_id}")
         logger.info(f"Generated command: {command}")
         logger.info(f"Parsed args: {args}")
@@ -478,6 +543,12 @@ class RenderService:
                 env=self._get_process_env(),
                 start_new_session=True,
             )
+
+            # There is a process to signal now, so cancel_render takes the kill
+            # path rather than the preparation checkpoint. Handing over here
+            # rather than earlier leaves no window where cancel is refused.
+            async with self._lock:
+                self._preparing_job_id = None
 
             await job_manager.set_job_pid(job_id, self._process.pid)
             logger.info(f"Job {job_id} started with PID {self._process.pid}")
@@ -536,6 +607,8 @@ class RenderService:
             async with self._lock:
                 self._process = None
                 self._current_job_id = None
+                self._preparing_job_id = None
+            self._cancelled_while_preparing.discard(job_id)
             # Auto-start next pending job if exists (for batch processing)
             await self._start_next_pending_job()
 
@@ -663,6 +736,19 @@ class RenderService:
             return False
 
         if not self._process:
+            # Still building the command - there is no subprocess to signal, so
+            # record the request and let start_render honour it at the next
+            # checkpoint. The GPS extraction already in flight runs to completion.
+            if self._preparing_job_id == job_id:
+                self._cancelled_while_preparing.add(job_id)
+                await job_manager.append_job_log(
+                    job_id,
+                    "Cancel requested - stopping once the GPS extraction for this file finishes",
+                )
+                await job_manager.update_job_status(job_id, JobStatus.CANCELLED)
+                logger.info(f"Cancel requested for job {job_id} while preparing")
+                return True
+
             logger.warning(f"Cannot cancel job {job_id}: no process running")
             return False
 

@@ -379,6 +379,28 @@ def timestamps_frozen(points: list[DjiMetaPoint]) -> bool:
     return min(p.timestamp for p in points) == max(p.timestamp for p in points)
 
 
+# A fix that wobbles inside this much has not gone anywhere: 1e-5 degrees is
+# about 1.1m of latitude, and less in longitude at these latitudes.
+_STATIONARY_SPREAD_DEG = 1e-5
+
+
+def position_frozen(points: list[DjiMetaPoint]) -> bool:
+    """Whether the GPS fix never moves across the whole track.
+
+    A stuck fix - the remote lost its link and kept re-reporting its last known
+    position - leaves a map with nothing to pan and a place name with nothing to
+    change. Judged over the entire track, so a clip that genuinely never moved
+    more than a metre is treated the same way, which is the right answer for it
+    too.
+    """
+    if len(points) < 2:
+        return False
+
+    lats = [p.lat for p in points]
+    lons = [p.lon for p in points]
+    return (max(lats) - min(lats)) < _STATIONARY_SPREAD_DEG and (max(lons) - min(lons)) < _STATIONARY_SPREAD_DEG
+
+
 def rebuild_timestamps(
     points: list[DjiMetaPoint],
     *,
@@ -408,23 +430,51 @@ def _repaired(raw: bytes, points: list[DjiMetaPoint], *, start_offset_s: float =
     return rebuild_timestamps(points, sample_rate_hz=read_declared_sample_rate(raw), start_offset_s=start_offset_s)
 
 
-def dji_meta_clock_frozen(file_path: Path, *, stream_index: int | None = None) -> bool:
-    """Whether this clip's GPS clock stands still, judged from a window at the start.
+# The tail probe sits at the very end of the clip. One clip had its clock stuck
+# for the first 93% and recovered only in its last minute, so sampling anywhere
+# short of the end landed inside the frozen stretch and mistook it for the whole.
+_PROBE_TAIL_WINDOW_S = 30.0
 
-    Timestamps carry one-second resolution, so the window has to be comfortably
-    longer than a second for an advancing clock to show up in it. The window
-    widens when GPS locked late and the first attempt came back empty.
+
+def dji_meta_clock_frozen(
+    file_path: Path,
+    *,
+    total_duration_s: float,
+    stream_index: int | None = None,
+) -> bool:
+    """Whether this clip's GPS clock stands still for its whole length.
+
+    Timestamps carry one-second resolution, so a probe window has to be
+    comfortably longer than a second for an advancing clock to show up in it.
+
+    A window at the start is not enough on its own: one clip had its clock stuck
+    for the first minutes and then recover, and rebuilding on that answer would
+    shift the recovered section by a window's own offset. So the start and the
+    tail have to agree - both stuck, on the same value.
     """
+    if total_duration_s <= 0:
+        return False
+
+    at_start: list[DjiMetaPoint] = []
     for window_s in FIRST_POINT_WINDOWS_S:
-        points = parse_dji_meta_window(
-            file_path,
-            start_s=0.0,
-            duration_s=window_s,
-            stream_index=stream_index,
-        )
-        if len(points) >= 2:
-            return timestamps_frozen(points)
-    return False
+        # Widen while GPS had not locked yet and the window came back empty.
+        at_start = parse_dji_meta_window(file_path, start_s=0.0, duration_s=window_s, stream_index=stream_index)
+        if len(at_start) >= 2:
+            break
+
+    if len(at_start) < 2 or not timestamps_frozen(at_start):
+        return False
+
+    at_tail = parse_dji_meta_window(
+        file_path,
+        start_s=max(0.0, total_duration_s - _PROBE_TAIL_WINDOW_S),
+        duration_s=_PROBE_TAIL_WINDOW_S,
+        stream_index=stream_index,
+    )
+    if len(at_tail) < 2 or not timestamps_frozen(at_tail):
+        return False
+
+    return at_tail[0].timestamp == at_start[0].timestamp
 
 
 def parse_dji_meta_window(

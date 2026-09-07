@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1108,7 +1109,11 @@ def _sample_dji_meta_for_frame(
             start_s=at_seconds - DJI_PREVIEW_WINDOW_S / 2,
             duration_s=DJI_PREVIEW_WINDOW_S,
             stream_index=stream_idx,
-            frozen_clock=frozen_check(file_path, stream_index=stream_idx),
+            frozen_clock=frozen_check(
+                file_path,
+                total_duration_s=total_duration_s or 0.0,
+                stream_index=stream_idx,
+            ),
         )
     )
 
@@ -1748,32 +1753,110 @@ def _convert_srt_to_gpx(srt_path: Path, tz_offset: timedelta | None = None) -> s
     return str(gpx_output)
 
 
-def _convert_dji_meta_to_gpx(video_path: Path) -> str:
+def _resolve_layout_xml_source(layout: str, layout_xml_path: str | None) -> Path | None:
+    """The XML file behind the chosen layout, or None when it has no XML form."""
+    if layout_xml_path:
+        return Path(layout_xml_path)
+
+    local = _resolve_layout_path(layout)
+    if local.exists():
+        return local
+
+    # gopro-overlay ships the built-ins as XML even where the CLI takes a name.
+    name = "default" if layout.startswith("default-") else layout
+    try:
+        return _resolve_gopro_overlay_layout_path(name)
+    except ValueError:
+        logger.warning("No XML form for layout %r; cannot drop its position widgets", layout)
+        return None
+
+
+def _write_layout_without_position_widgets(source: Path, notify: Callable[[str], None]) -> Path | None:
+    """A temp copy of `source` with the position-driven components removed.
+
+    The original is never touched - it is the user's template.
+
+    Returns:
+        Path to the filtered layout, or None when nothing would be left to draw.
+    """
+    import uuid
+
+    from gpstitch.services.layout_filter import POSITION_COMPONENT_TYPES, filter_layout_components
+
+    try:
+        xml = source.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not read layout %s: %s", source, e)
+        return None
+
+    filtered, dropped, remaining = filter_layout_components(xml, POSITION_COMPONENT_TYPES)
+    if remaining == 0:
+        return None
+    if not dropped:
+        return source
+
+    output = Path(tempfile.gettempdir()) / f"gpstitch_nogps_{source.stem}_{uuid.uuid4().hex[:8]}.xml"
+    output.write_text(filtered, encoding="utf-8")
+    notify(f"Left out {len(dropped)} widget(s) with no moving position: {', '.join(sorted(set(dropped)))}")
+    return output
+
+
+@dataclass(frozen=True)
+class DjiTrackSummary:
+    """What the GPS stream turned out to hold, for the caller to react to."""
+
+    point_count: int
+    duration_s: float
+    position_frozen: bool
+
+
+def _convert_dji_meta_to_gpx(
+    video_path: Path, notify: Callable[[str], None] | None = None
+) -> tuple[str, DjiTrackSummary]:
     """Convert DJI meta GPS stream to GPX for CLI compatibility.
 
     Uses a unique temp file path to avoid race conditions in concurrent renders.
 
+    Reading the stream means seeking through the whole file - measured at 107s on
+    a 12GB clip - so `notify` reports the stages as they happen.
+
     Returns:
-        Path string to the generated GPX file
+        (path to the generated GPX, what the track turned out to contain)
     """
+    import time
     import uuid
 
     from gpstitch.services.dji_meta_parser import (
         dji_meta_to_gpx_file,
         parse_dji_meta_file,
+        position_frozen,
     )
     from gpstitch.services.srt_parser import calc_sample_rate
 
+    def say(message: str) -> None:
+        if notify is not None:
+            notify(message)
+
+    say(f"Reading embedded GPS from {video_path.name} - this covers the whole stream and can take a few minutes")
+    started = time.monotonic()
     points = parse_dji_meta_file(video_path)
-    # DJI Action typically records at 25fps; thin to ~1Hz
-    source_hz = (
-        len(points) / max((points[-1].timestamp - points[0].timestamp).total_seconds(), 1) if len(points) > 1 else 25.0
-    )
+    elapsed = time.monotonic() - started
+
+    span_s = (points[-1].timestamp - points[0].timestamp).total_seconds() if len(points) > 1 else 0.0
+    source_hz = len(points) / span_s if span_s > 0 else 25.0
+    say(f"Read {len(points)} GPS points in {elapsed:.0f}s ({source_hz:.1f}Hz over {span_s / 60:.1f} min)")
+
     sample_rate = calc_sample_rate(source_hz, DEFAULT_GPS_TARGET_HZ)
 
     gpx_output = Path(tempfile.gettempdir()) / f"gpstitch_djimeta_{video_path.stem}_{uuid.uuid4().hex[:8]}.gpx"
     dji_meta_to_gpx_file(video_path, gpx_output, sample_rate, points=points)
-    return str(gpx_output)
+    say(f"Wrote GPX thinned to every {sample_rate}th point")
+
+    return str(gpx_output), DjiTrackSummary(
+        point_count=len(points),
+        duration_s=span_s,
+        position_frozen=position_frozen(points),
+    )
 
 
 def generate_cli_command(
@@ -1792,6 +1875,7 @@ def generate_cli_command(
     gps_dop_max: float = DEFAULT_GPS_DOP_MAX,
     gps_speed_max: float = DEFAULT_GPS_SPEED_MAX,
     odo_offset: float | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str]]:
     """Generate the CLI command for full video processing.
 
@@ -1801,6 +1885,11 @@ def generate_cli_command(
     3. GPX/FIT only (overlay-only mode)
 
     Note: All paths and values are properly shell-escaped to prevent command injection.
+
+    Args:
+        on_progress: Called with a human-readable line as each slow stage starts
+            and finishes. Reading a DJI clip's GPS stream takes minutes, and the
+            caller surfaces these in the job log so the wait is not silent.
 
     Returns:
         Tuple of (command_string, temp_files) where temp_files is a list of
@@ -1813,6 +1902,11 @@ def generate_cli_command(
     from gpstitch.services.file_manager import file_manager
 
     logger = logging.getLogger(__name__)
+
+    def notify(message: str) -> None:
+        logger.info(message)
+        if on_progress is not None:
+            on_progress(message)
 
     files = file_manager.get_files(session_id)
     primary = file_manager.get_primary_file(session_id)
@@ -1830,6 +1924,10 @@ def generate_cli_command(
 
     # Track temp files created during command generation (e.g. SRT→GPX)
     temp_files: list[str] = []
+
+    # Set when the GPS fix turns out to be stuck, so the layout loses the widgets
+    # that would otherwise be drawn frozen.
+    drop_position_widgets = False
 
     primary_path = primary.file_path
     primary_type = primary.file_type
@@ -1955,9 +2053,15 @@ def generate_cli_command(
     elif primary_type == "video" and getattr(primary.video_metadata, "has_dji_meta", False) is True and not secondary:
         # Mode 4: DJI Action video with embedded GPS (DJI meta stream)
         # Extract GPS → convert to GPX temp file → use --use-gpx-only
-        dji_meta_gpx_path = _convert_dji_meta_to_gpx(Path(primary_path))
+        dji_meta_gpx_path, dji_track = _convert_dji_meta_to_gpx(Path(primary_path), notify=notify)
         temp_files.append(dji_meta_gpx_path)
         logger.info(f"Converted DJI meta GPS to GPX: {dji_meta_gpx_path}")
+        if dji_track.position_frozen:
+            drop_position_widgets = True
+            notify(
+                "GPS position never changes in this clip - the remote likely lost its link. "
+                "Widgets that need the track to move will be left out."
+            )
 
         cmd_parts = [
             "gpstitch-dashboard",
@@ -1981,7 +2085,22 @@ def generate_cli_command(
             cmd_parts.append(f"--overlay-size {canvas_width}x{canvas_height}")
 
     # Handle layout - either custom XML or predefined
-    if layout_xml_path:
+    if drop_position_widgets:
+        # The position widgets have to come out of the XML: gopro-overlay's own
+        # --exclude only matches components carrying a `name`, and templates from
+        # the GPStitch editor have none.
+        source = _resolve_layout_xml_source(layout, layout_xml_path)
+        filtered = _write_layout_without_position_widgets(source, notify) if source else None
+        if filtered is None:
+            raise ValueError(
+                f"GPS position never changes in {Path(primary_path).name} - the remote likely lost its "
+                f"link - and the chosen layout has nothing left to draw without its map, place name and "
+                f"compass. Rendering would only re-encode the video, so this clip is being skipped."
+            )
+        temp_files.append(str(filtered))
+        cmd_parts.append("--layout xml")
+        cmd_parts.append(f"--layout-xml {shlex.quote(str(filtered))}")
+    elif layout_xml_path:
         # Custom template: use --layout xml --layout-xml <path>
         cmd_parts.append("--layout xml")
         cmd_parts.append(f"--layout-xml {shlex.quote(layout_xml_path)}")

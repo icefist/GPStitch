@@ -22,6 +22,7 @@ from gpstitch.services.dji_meta_parser import (
     DjiMetaPoint,
     dji_meta_clock_frozen,
     parse_dji_meta_window,
+    position_frozen,
     read_declared_sample_rate,
     rebuild_timestamps,
     sample_dji_meta_track,
@@ -250,37 +251,108 @@ class TestSingleWindow:
 
 
 class TestClockFrozenProbe:
-    def _probe(self, results, tmp_path):
-        """Drive the probe with one canned result per widening attempt."""
-        durations: list[float] = []
-        attempts = iter(results)
+    """The question is whether the clock is stuck for the clip's whole length.
+
+    One real clip had its clock stuck for the first minutes and then recover, so
+    a window at the start alone is not enough: a rebuild driven by that answer
+    would shift the recovered section by the window's own offset. Two windows,
+    at the start and near the end, have to agree.
+    """
+
+    def _probe(self, per_start, tmp_path, total_duration_s=600.0):
+        """Drive the probe with canned results keyed by window start."""
+        seen: list[tuple[float, float]] = []
 
         def fake_window(file_path, *, start_s, duration_s, stream_index=None, frozen_clock=False):
-            durations.append(duration_s)
-            return next(attempts, [])
+            seen.append((start_s, duration_s))
+            for key, points in per_start:
+                if key == start_s:
+                    return points
+            return []
 
         with patch("gpstitch.services.dji_meta_parser.parse_dji_meta_window", side_effect=fake_window):
-            return dji_meta_clock_frozen(tmp_path / "v.mp4", stream_index=2), durations
+            frozen = dji_meta_clock_frozen(
+                tmp_path / "v.mp4",
+                total_duration_s=total_duration_s,
+                stream_index=2,
+            )
+        return frozen, seen
 
-    def test_a_window_of_identical_timestamps_is_frozen(self, tmp_path):
-        frozen, durations = self._probe([[point(0), point(1)]], tmp_path)
+    def test_both_ends_stuck_on_one_timestamp_is_frozen(self, tmp_path):
+        frozen, seen = self._probe(
+            [(0.0, [point(0), point(1)]), (570.0, [point(0), point(1)])],
+            tmp_path,
+        )
         assert frozen is True
-        assert durations[0] > 1.0, "the window must outrun the clock's one-second resolution"
+        assert seen[0][1] > 1.0, "the window must outrun the clock's one-second resolution"
+        assert any(start > 0.0 for start, _ in seen), "the tail of the clip must be checked too"
 
-    def test_an_advancing_clock_is_not_frozen(self, tmp_path):
-        frozen, _ = self._probe([[point(0), point(30, FROZEN + timedelta(seconds=1))]], tmp_path)
+    def test_a_clock_that_only_recovers_at_the_very_end_is_not_frozen(self, tmp_path):
+        """The real shape: one clip was stuck for 93% of its length.
+
+        Sampling at 80% of the clip landed inside the frozen stretch and called
+        the whole thing frozen, so the tail window has to sit at the very end.
+        """
+        recovered = [
+            point(26483, FROZEN + timedelta(seconds=14000)),
+            point(26513, FROZEN + timedelta(seconds=14001)),
+        ]
+        frozen, seen = self._probe(
+            [(0.0, [point(0), point(1)]), (570.0, recovered)],
+            tmp_path,
+            total_duration_s=600.0,
+        )
+        assert frozen is False
+        assert max(start for start, _ in seen) >= 540.0, "the tail window must reach the end of the clip"
+
+    def test_a_clock_that_recovers_later_is_not_frozen(self, tmp_path):
+        """The real case: stuck at the start, advancing by the end."""
+        late = [point(0, FROZEN + timedelta(seconds=400)), point(30, FROZEN + timedelta(seconds=401))]
+        frozen, _ = self._probe([(0.0, [point(0), point(1)]), (570.0, late)], tmp_path)
         assert frozen is False
 
-    def test_the_window_widens_when_gps_locked_late(self, tmp_path):
-        frozen, durations = self._probe([[], [point(0), point(1)]], tmp_path)
+    def test_a_tail_stuck_on_a_different_timestamp_is_not_frozen(self, tmp_path):
+        """Two stuck stretches at different values are not one frozen clock."""
+        late = [point(0, FROZEN + timedelta(seconds=400)), point(1, FROZEN + timedelta(seconds=400))]
+        frozen, _ = self._probe([(0.0, [point(0), point(1)]), (570.0, late)], tmp_path)
+        assert frozen is False
+
+    def test_an_advancing_start_needs_no_second_window(self, tmp_path):
+        frozen, seen = self._probe(
+            [(0.0, [point(0), point(30, FROZEN + timedelta(seconds=1))])],
+            tmp_path,
+        )
+        assert frozen is False
+        assert len(seen) == 1, "an advancing clock is settled by the first window"
+
+    def test_the_first_window_widens_when_gps_locked_late(self, tmp_path):
+        attempts = []
+
+        def fake_window(file_path, *, start_s, duration_s, stream_index=None, frozen_clock=False):
+            attempts.append((start_s, duration_s))
+            if start_s == 0.0 and len(attempts) == 1:
+                return []
+            return [point(0), point(1)]
+
+        with patch("gpstitch.services.dji_meta_parser.parse_dji_meta_window", side_effect=fake_window):
+            frozen = dji_meta_clock_frozen(tmp_path / "v.mp4", total_duration_s=600.0, stream_index=2)
+
         assert frozen is True
-        assert len(durations) == 2
-        assert durations[1] > durations[0]
+        assert attempts[1][1] > attempts[0][1], "the empty window should widen"
 
     def test_a_clip_with_no_gps_at_all_is_not_called_frozen(self, tmp_path):
         """No evidence of a freeze is not evidence of one."""
         frozen, _ = self._probe([], tmp_path)
         assert frozen is False
+
+    def test_an_empty_tail_window_is_not_called_frozen(self, tmp_path):
+        frozen, _ = self._probe([(0.0, [point(0), point(1)])], tmp_path)
+        assert frozen is False
+
+    def test_an_unknown_duration_cannot_be_judged(self, tmp_path):
+        frozen, seen = self._probe([(0.0, [point(0), point(1)])], tmp_path, total_duration_s=0.0)
+        assert frozen is False
+        assert seen == [], "without a duration there is no tail to compare against"
 
 
 class TestPreviewSampling:
@@ -310,7 +382,7 @@ class TestPreviewSampling:
             detect=lambda _: 2,
             window=fake_window,
             coarse=fake_coarse,
-            frozen_check=lambda _, stream_index=None: frozen,
+            frozen_check=lambda _, total_duration_s=0.0, stream_index=None: frozen,
         )
         return points, told
 
@@ -333,3 +405,47 @@ class TestPreviewSampling:
             if FROZEN + timedelta(seconds=95) < p.timestamp < FROZEN + timedelta(seconds=105)
         ]
         assert at_window == [FROZEN + timedelta(seconds=97), FROZEN + timedelta(seconds=98)]
+
+
+class TestPositionFrozen:
+    """A stuck GPS fix reports the same coordinates for the whole recording.
+
+    Three clips off one card did this - the Bluetooth remote lost its link and
+    kept re-reporting its last known fix, so the clock, position, altitude and
+    velocity were all constant. Rebuilding the time axis makes such a clip
+    render, but its map and place name have nothing to show.
+    """
+
+    def _at(self, lat: float, lon: float, frame_idx: int = 0) -> DjiMetaPoint:
+        return DjiMetaPoint(
+            frame_idx=frame_idx,
+            timestamp=FROZEN,
+            lat=lat,
+            lon=lon,
+            alt_m=45.27,
+            velocity_2d=(0.0, 0.0),
+        )
+
+    def test_identical_coordinates_are_frozen(self):
+        points = [self._at(53.215096, 6.614336, i) for i in range(5)]
+        assert position_frozen(points) is True
+
+    def test_a_moving_track_is_not_frozen(self):
+        points = [self._at(53.215096 + i * 0.001, 6.614336, i) for i in range(5)]
+        assert position_frozen(points) is False
+
+    def test_a_metre_of_jitter_still_counts_as_frozen(self):
+        """A fix that wobbles in its last digits has still not gone anywhere."""
+        points = [self._at(53.215096 + i * 1e-6, 6.614336 - i * 1e-6, i) for i in range(5)]
+        assert position_frozen(points) is True
+
+    def test_moving_in_longitude_alone_is_not_frozen(self):
+        points = [self._at(53.215096, 6.614336 + i * 0.001, i) for i in range(5)]
+        assert position_frozen(points) is False
+
+    def test_a_single_point_is_not_judged(self):
+        """One point says nothing about whether the fix was stuck."""
+        assert position_frozen([self._at(53.215096, 6.614336)]) is False
+
+    def test_no_points_are_not_judged(self):
+        assert position_frozen([]) is False

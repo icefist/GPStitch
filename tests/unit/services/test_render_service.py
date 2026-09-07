@@ -371,3 +371,290 @@ class TestNeedsPillarboxUsesSidecarCanvas:
         canvas_w, canvas_h, video_w, video_h = result
         assert (canvas_w, canvas_h) == (3840, 2880)
         assert (video_w, video_h) == (3840, 2160)
+
+
+class TestDjiMetaMtimeAlignment:
+    """mtime for a DJI clip comes from its first GPS point.
+
+    Reading the whole stream to reach points[0] means seeking through the entire
+    file - 107s measured on a 12GB clip - and generate_cli_command already paid
+    that once for the GPX conversion. first_dji_meta_point reads a window from
+    the start instead.
+    """
+
+    @pytest.fixture
+    def render_service(self):
+        from gpstitch.services.render_service import RenderService
+
+        return RenderService()
+
+    @pytest.fixture
+    def config(self):
+        from gpstitch.models.job import RenderJobConfig
+
+        return RenderJobConfig(
+            session_id="s1",
+            layout="default-1920x1080",
+            output_file="/tmp/out.mp4",
+            video_time_alignment="auto",
+        )
+
+    def _dji_session(self, monkeypatch, frame_idx=0, fps=29.97):
+        """A session whose primary is a DJI clip with embedded GPS."""
+        from gpstitch.services import render_service as module
+
+        primary = SimpleNamespace(
+            file_type="video",
+            file_path="/tmp/dji.mp4",
+            video_metadata=SimpleNamespace(has_dji_meta=True, frame_rate=fps),
+        )
+        fake_manager = SimpleNamespace(
+            get_primary_file=lambda _s: primary,
+            get_secondary_file=lambda _s: None,
+        )
+        monkeypatch.setattr(module, "file_manager", fake_manager, raising=False)
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "gpstitch.services.file_manager",
+            SimpleNamespace(file_manager=fake_manager),
+        )
+        return primary
+
+    def test_the_whole_stream_is_not_parsed(self, render_service, config, monkeypatch):
+        self._dji_session(monkeypatch)
+        point = SimpleNamespace(timestamp=datetime.datetime(2026, 9, 6, 18, 25, 14), frame_idx=0)
+
+        with (
+            patch("gpstitch.services.dji_meta_parser.first_dji_meta_point", return_value=point) as cheap,
+            patch("gpstitch.services.dji_meta_parser.parse_dji_meta_file") as expensive,
+        ):
+            result = render_service._resolve_mtime_for_alignment(config, "/tmp/dji.mp4")
+
+        assert cheap.called, "should read only the first point"
+        assert not expensive.called, "must not seek through the whole stream"
+        assert result == datetime.datetime(2026, 9, 6, 18, 25, 14, tzinfo=datetime.UTC).timestamp()
+
+    def test_a_late_gps_lock_is_subtracted(self, render_service, config, monkeypatch):
+        """points[0].frame_idx > 0 means GPS locked after recording began."""
+        self._dji_session(monkeypatch, fps=30.0)
+        point = SimpleNamespace(timestamp=datetime.datetime(2026, 9, 6, 18, 25, 14), frame_idx=600)
+
+        with patch("gpstitch.services.dji_meta_parser.first_dji_meta_point", return_value=point):
+            result = render_service._resolve_mtime_for_alignment(config, "/tmp/dji.mp4")
+
+        expected = datetime.datetime(2026, 9, 6, 18, 25, 14, tzinfo=datetime.UTC).timestamp() - 20.0
+        assert result == expected
+
+    def test_no_gps_point_falls_through(self, render_service, config, monkeypatch):
+        """No first point means no DJI alignment; the caller's other modes apply."""
+        self._dji_session(monkeypatch)
+
+        with (
+            patch("gpstitch.services.dji_meta_parser.first_dji_meta_point", return_value=None),
+            patch("gpstitch.services.renderer._extract_creation_time", return_value=None),
+            patch("gopro_overlay.ffmpeg_gopro.filestat") as filestat,
+        ):
+            filestat.return_value = SimpleNamespace(ctime=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC))
+            result = render_service._resolve_mtime_for_alignment(config, "/tmp/dji.mp4")
+
+        assert result == datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC).timestamp()
+
+
+class TestPreparationPhase:
+    """What happens before the render subprocess exists.
+
+    generate_cli_command reads the whole GPS stream to build a GPX - ~107s on a
+    12GB clip. It is synchronous, and was called directly from this coroutine, so
+    it blocked the event loop for that whole time: no status poll, no log fetch
+    and no cancel request could be served. The job also stayed PENDING with an
+    empty log, and cancel refused because no subprocess existed yet.
+    """
+
+    @pytest.fixture
+    def render_service(self):
+        from gpstitch.services.render_service import RenderService
+
+        return RenderService()
+
+    @pytest.fixture
+    def config(self):
+        from gpstitch.models.job import RenderJobConfig
+
+        return RenderJobConfig(
+            session_id="s1",
+            layout="default-1920x1080",
+            output_file="/tmp/out.mp4",
+            video_time_alignment="none",
+        )
+
+    @pytest.fixture
+    def harness(self, render_service, monkeypatch):
+        """Stub everything around command generation; record status and log calls."""
+        import sys as _sys
+
+        from gpstitch.services import render_service as module
+
+        statuses = []
+        log_lines = []
+
+        jm = MagicMock()
+        jm.update_job_status = AsyncMock(side_effect=lambda jid, st, err=None: statuses.append(st))
+        jm.append_job_log = AsyncMock(side_effect=lambda jid, line: log_lines.append(line))
+        jm.update_job_progress = AsyncMock()
+        jm.set_job_pid = AsyncMock()
+        jm.get_job = AsyncMock(return_value=None)
+        monkeypatch.setattr(module, "job_manager", jm)
+
+        # No primary file: skips pillarbox and mtime handling entirely.
+        empty_manager = SimpleNamespace(get_primary_file=lambda _s: None, get_secondary_file=lambda _s: None)
+        monkeypatch.setitem(_sys.modules, "gpstitch.services.file_manager", SimpleNamespace(file_manager=empty_manager))
+
+        monkeypatch.setattr(render_service, "_find_gopro_dashboard", lambda: "/usr/bin/gopro-dashboard.py")
+        monkeypatch.setattr(render_service, "_stream_output", AsyncMock())
+        monkeypatch.setattr(render_service, "_start_next_pending_job", AsyncMock())
+
+        spawned = []
+
+        async def fake_exec(*args, **kwargs):
+            spawned.append(args)
+            proc = MagicMock()
+            proc.pid = 4242
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        return SimpleNamespace(statuses=statuses, log_lines=log_lines, spawned=spawned, job_manager=jm)
+
+    async def test_command_generation_does_not_block_the_event_loop(self, render_service, config, harness, monkeypatch):
+        """A coroutine scheduled during generation must actually get to run."""
+        import threading
+
+        from gpstitch.services import render_service as module
+
+        released = threading.Event()
+        observed = {}
+
+        def fake_generate(**kwargs):
+            observed["loop_ran"] = released.wait(timeout=5.0)
+            return ("gpstitch-dashboard /tmp/out.mp4", [])
+
+        monkeypatch.setattr(module, "generate_cli_command", fake_generate)
+
+        async def release():
+            await asyncio.sleep(0.01)
+            released.set()
+
+        await asyncio.gather(render_service.start_render("job-1", config), release())
+
+        assert observed["loop_ran"] is True, "the event loop was blocked during command generation"
+
+    async def test_the_job_is_marked_running_before_preparation(self, render_service, config, harness, monkeypatch):
+        from gpstitch.models.job import JobStatus
+        from gpstitch.services import render_service as module
+
+        order = []
+        harness.job_manager.update_job_status = AsyncMock(
+            side_effect=lambda jid, st, err=None: order.append(f"status:{st.value}")
+        )
+
+        def fake_generate(**kwargs):
+            order.append("generate")
+            return ("gpstitch-dashboard /tmp/out.mp4", [])
+
+        monkeypatch.setattr(module, "generate_cli_command", fake_generate)
+
+        await render_service.start_render("job-1", config)
+
+        assert order.index(f"status:{JobStatus.RUNNING.value}") < order.index("generate")
+
+    async def test_preparation_progress_reaches_the_job_log(self, render_service, config, harness, monkeypatch):
+        from gpstitch.services import render_service as module
+
+        def fake_generate(**kwargs):
+            kwargs["on_progress"]("Extracting embedded GPS telemetry")
+            kwargs["on_progress"]("Extracted 43917 GPS points in 107s")
+            return ("gpstitch-dashboard /tmp/out.mp4", [])
+
+        monkeypatch.setattr(module, "generate_cli_command", fake_generate)
+
+        await render_service.start_render("job-1", config)
+
+        assert "Extracting embedded GPS telemetry" in harness.log_lines
+        assert "Extracted 43917 GPS points in 107s" in harness.log_lines
+
+    async def test_cancel_is_accepted_while_preparing(self, render_service):
+        """No subprocess exists yet, but the job is ours and must be stoppable."""
+        render_service._current_job_id = "job-1"
+        render_service._preparing_job_id = "job-1"
+        render_service._process = None
+
+        assert await render_service.cancel_render("job-1") is True
+
+    async def test_a_cancelled_preparation_never_launches_the_render(
+        self, render_service, config, harness, monkeypatch, tmp_path
+    ):
+        from gpstitch.models.job import JobStatus
+        from gpstitch.services import render_service as module
+
+        temp_gpx = tmp_path / "scratch.gpx"
+        temp_gpx.write_text("<gpx/>", encoding="utf-8")
+        loop = asyncio.get_running_loop()
+
+        def fake_generate(**kwargs):
+            # The cancel request arrives mid-extraction, from the event loop.
+            future = asyncio.run_coroutine_threadsafe(render_service.cancel_render("job-1"), loop)
+            assert future.result(timeout=5.0) is True
+            return ("gpstitch-dashboard /tmp/out.mp4", [str(temp_gpx)])
+
+        monkeypatch.setattr(module, "generate_cli_command", fake_generate)
+
+        await render_service.start_render("job-1", config)
+
+        assert harness.spawned == [], "a cancelled job must not start the render subprocess"
+        assert JobStatus.CANCELLED in harness.statuses
+        assert not temp_gpx.exists(), "temp files from the abandoned preparation should be cleaned up"
+
+    async def test_a_cancel_landing_after_preparation_still_prevents_the_launch(
+        self, render_service, config, harness, monkeypatch
+    ):
+        """Preparation is not the only slow step before the subprocess exists.
+
+        Pillarboxing re-encodes the whole video, and mtime alignment reads the
+        stream, so a cancel can arrive after the command is built but before
+        anything is launched. It must be honoured there too.
+        """
+        from gpstitch.services import render_service as module
+
+        monkeypatch.setattr(module, "generate_cli_command", lambda **kwargs: ("gpstitch-dashboard /tmp/out.mp4", []))
+
+        def cancel_then_resolve():
+            render_service._cancelled_while_preparing.add("job-1")
+            return "/usr/bin/gopro-dashboard.py"
+
+        monkeypatch.setattr(render_service, "_find_gopro_dashboard", cancel_then_resolve)
+
+        await render_service.start_render("job-1", config)
+
+        assert harness.spawned == [], "a cancelled job must not start the render subprocess"
+        assert "Cancelled before rendering started" in harness.log_lines
+
+    async def test_cancel_is_still_accepted_after_the_command_is_built(
+        self, render_service, config, harness, monkeypatch
+    ):
+        """The preparing marker has to survive until a process exists."""
+        from gpstitch.services import render_service as module
+
+        accepted = {}
+
+        monkeypatch.setattr(module, "generate_cli_command", lambda **kwargs: ("gpstitch-dashboard /tmp/out.mp4", []))
+
+        def check_then_resolve():
+            # Runs after the command is built, before the subprocess is created.
+            accepted["preparing"] = render_service._preparing_job_id
+            return "/usr/bin/gopro-dashboard.py"
+
+        monkeypatch.setattr(render_service, "_find_gopro_dashboard", check_then_resolve)
+
+        await render_service.start_render("job-1", config)
+
+        assert accepted["preparing"] == "job-1", "cancel would be refused in this window"

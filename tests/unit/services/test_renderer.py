@@ -1809,9 +1809,12 @@ class TestGenerateCliCommandDjiMeta:
     def test_dji_meta_video_uses_gpx_only(self, mock_convert, mock_file_manager):
         """DJI Action video with embedded GPS should use --use-gpx-only with temp GPX."""
         from gpstitch.models.schemas import FileRole
-        from gpstitch.services.renderer import generate_cli_command
+        from gpstitch.services.renderer import DjiTrackSummary, generate_cli_command
 
-        mock_convert.return_value = "/tmp/gpstitch_djimeta_test_abc12345.gpx"
+        mock_convert.return_value = (
+            "/tmp/gpstitch_djimeta_test_abc12345.gpx",
+            DjiTrackSummary(point_count=100, duration_s=100.0, position_frozen=False),
+        )
 
         primary = self._make_file_info(
             "/tmp/DJI_video.MP4",
@@ -1841,9 +1844,12 @@ class TestGenerateCliCommandDjiMeta:
     def test_dji_meta_video_includes_wrapper_arg(self, mock_convert, mock_file_manager):
         """DJI Action video should include --ts-dji-meta-source wrapper arg."""
         from gpstitch.models.schemas import FileRole
-        from gpstitch.services.renderer import generate_cli_command
+        from gpstitch.services.renderer import DjiTrackSummary, generate_cli_command
 
-        mock_convert.return_value = "/tmp/gpstitch_djimeta_test.gpx"
+        mock_convert.return_value = (
+            "/tmp/gpstitch_djimeta_test.gpx",
+            DjiTrackSummary(point_count=100, duration_s=100.0, position_frozen=False),
+        )
 
         primary = self._make_file_info(
             "/tmp/DJI_video.MP4",
@@ -1869,9 +1875,12 @@ class TestGenerateCliCommandDjiMeta:
     def test_dji_meta_video_includes_overlay_size(self, mock_convert, mock_file_manager):
         """DJI Action video should include --overlay-size."""
         from gpstitch.models.schemas import FileRole
-        from gpstitch.services.renderer import generate_cli_command
+        from gpstitch.services.renderer import DjiTrackSummary, generate_cli_command
 
-        mock_convert.return_value = "/tmp/gpstitch_djimeta_test.gpx"
+        mock_convert.return_value = (
+            "/tmp/gpstitch_djimeta_test.gpx",
+            DjiTrackSummary(point_count=100, duration_s=100.0, position_frozen=False),
+        )
 
         primary = self._make_file_info(
             "/tmp/DJI_video.MP4",

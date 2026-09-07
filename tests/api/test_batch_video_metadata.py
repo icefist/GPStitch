@@ -64,7 +64,7 @@ class TestBatchExtractsMetadata:
         embedded GPS to a temporary GPX and rendering from that instead of
         asking gopro-dashboard for GoPro GPMF the file does not have.
         """
-        from gpstitch.services.renderer import generate_cli_command
+        from gpstitch.services.renderer import DjiTrackSummary, generate_cli_command
 
         with patch("gpstitch.api.render.extract_video_metadata", return_value=_dji_metadata()):
             response = await async_client.post(
@@ -79,7 +79,8 @@ class TestBatchExtractsMetadata:
 
         fake_gpx = temp_dir / "converted.gpx"
         fake_gpx.write_text('<?xml version="1.0"?><gpx></gpx>', encoding="utf-8")
-        with patch("gpstitch.services.renderer._convert_dji_meta_to_gpx", return_value=str(fake_gpx)):
+        summary = DjiTrackSummary(point_count=100, duration_s=100.0, position_frozen=False)
+        with patch("gpstitch.services.renderer._convert_dji_meta_to_gpx", return_value=(str(fake_gpx), summary)):
             command, _ = generate_cli_command(
                 session_id=job.config.session_id,
                 output_file="/tmp/out.mp4",
