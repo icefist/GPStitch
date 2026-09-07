@@ -400,6 +400,34 @@ def clock_unreliable(points: list[DjiMetaPoint], *, sample_rate_hz: float | None
     return longest > limit
 
 
+def track_span_seconds(points: list[DjiMetaPoint]) -> float:
+    """How much time the track covers, from its earliest point to its latest.
+
+    Taken across all points rather than first-to-last, because parse_dji_meta
+    returns samples in the order the stream carries them.
+    """
+    if len(points) < 2:
+        return 0.0
+    return (max(p.timestamp for p in points) - min(p.timestamp for p in points)).total_seconds()
+
+
+def derive_sample_rate(points: list[DjiMetaPoint], *, target_hz: int) -> int:
+    """Take every N-th point to land near `target_hz`, from the track's own timing.
+
+    Returns 1 - keep everything - when there is no timing to derive from. That
+    means a track spanning no time, which cannot be rendered at all; refusing
+    such a track is a rendering precondition and belongs to the caller that
+    cares, not here. Dividing by a duration floored at one second instead once
+    returned a rate equal to the point count, leaving a single-point track.
+    """
+    from gpstitch.services.srt_parser import calc_sample_rate
+
+    span_s = track_span_seconds(points)
+    if span_s <= 0:
+        return 1
+    return calc_sample_rate(len(points) / span_s, target_hz)
+
+
 # A fix that wobbles inside this much has not gone anywhere: 1e-5 degrees is
 # about 1.1m of latitude, and less in longitude at these latitudes.
 _STATIONARY_SPREAD_DEG = 1e-5

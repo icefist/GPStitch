@@ -1153,7 +1153,6 @@ def _load_dji_meta_for_preview(
         parse_dji_meta_window,
         sample_dji_meta_track,
     )
-    from gpstitch.services.srt_parser import calc_sample_rate
 
     target_hz = DEFAULT_GPS_TARGET_HZ
 
@@ -1172,20 +1171,9 @@ def _load_dji_meta_for_preview(
     if not points:
         raise ValueError(f"No valid GPS data found in DJI meta stream: {file_path}")
 
-    # Estimate source rate from timestamps
-    if len(points) > 1:
-        duration_s = (points[-1].timestamp - points[0].timestamp).total_seconds()
-        if duration_s > 0:
-            source_hz = len(points) / duration_s
-            sample_rate = calc_sample_rate(source_hz, target_hz)
-        else:
-            sample_rate = 1
-    else:
-        sample_rate = 1
+    from gpstitch.services.dji_meta_parser import derive_sample_rate, dji_meta_to_timeseries
 
-    from gpstitch.services.dji_meta_parser import dji_meta_to_timeseries
-
-    timeseries = dji_meta_to_timeseries(points, units, sample_rate)
+    timeseries = dji_meta_to_timeseries(points, units, derive_sample_rate(points, target_hz=target_hz))
     _apply_timeseries_processing(timeseries)
     return timeseries
 
@@ -1830,11 +1818,12 @@ def _convert_dji_meta_to_gpx(
     import uuid
 
     from gpstitch.services.dji_meta_parser import (
+        derive_sample_rate,
         dji_meta_to_gpx_file,
         parse_dji_meta_file,
         position_frozen,
+        track_span_seconds,
     )
-    from gpstitch.services.srt_parser import calc_sample_rate
 
     def say(message: str) -> None:
         if notify is not None:
@@ -1845,11 +1834,11 @@ def _convert_dji_meta_to_gpx(
     points = parse_dji_meta_file(video_path)
     elapsed = time.monotonic() - started
 
-    span_s = (points[-1].timestamp - points[0].timestamp).total_seconds() if len(points) > 1 else 0.0
-    source_hz = len(points) / span_s if span_s > 0 else 25.0
+    span_s = track_span_seconds(points)
+    source_hz = len(points) / span_s if span_s > 0 else 0.0
     say(f"Read {len(points)} GPS points in {elapsed:.0f}s ({source_hz:.1f}Hz over {span_s / 60:.1f} min)")
 
-    sample_rate = calc_sample_rate(source_hz, DEFAULT_GPS_TARGET_HZ)
+    sample_rate = derive_sample_rate(points, target_hz=DEFAULT_GPS_TARGET_HZ)
 
     gpx_output = Path(tempfile.gettempdir()) / f"gpstitch_djimeta_{video_path.stem}_{uuid.uuid4().hex[:8]}.gpx"
     dji_meta_to_gpx_file(video_path, gpx_output, sample_rate, points=points)

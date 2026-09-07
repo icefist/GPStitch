@@ -88,10 +88,11 @@ def patch_dji_meta_load(video_path: str) -> None:
 
     from gpstitch.constants import DEFAULT_GPS_TARGET_HZ
     from gpstitch.services.dji_meta_parser import (
+        derive_sample_rate,
         dji_meta_to_timeseries,
         parse_dji_meta_file,
+        track_span_seconds,
     )
-    from gpstitch.services.srt_parser import calc_sample_rate
 
     video_filepath = Path(video_path)
 
@@ -99,13 +100,10 @@ def patch_dji_meta_load(video_path: str) -> None:
     if not points:
         raise ValueError(f"No valid GPS data found in DJI meta stream: {video_filepath}")
 
-    # Thin to the target Hz. A track spanning no time has no rate to derive from,
-    # and dividing by a floored one-second duration turned a clip whose GPS clock
-    # never advanced into points[::43917]. Timeseries is keyed by timestamp, so
-    # such a track collapses to one point however it is thinned - there is nothing
-    # to render. The parser rebuilds a frozen clock; this says so plainly when
-    # even that could not.
-    duration_s = (points[-1].timestamp - points[0].timestamp).total_seconds()
+    # Timeseries is keyed by timestamp, so a track spanning no time collapses to
+    # one point however it is thinned - there is nothing to render. The parser
+    # rebuilds a stalled clock; this says so plainly when even that could not.
+    duration_s = track_span_seconds(points)
     if duration_s <= 0:
         raise ValueError(
             f"GPS track in {video_filepath.name} spans no time - all {len(points)} points are stamped "
@@ -114,7 +112,7 @@ def patch_dji_meta_load(video_path: str) -> None:
         )
 
     source_hz = len(points) / duration_s
-    sample_rate = calc_sample_rate(source_hz, DEFAULT_GPS_TARGET_HZ)
+    sample_rate = derive_sample_rate(points, target_hz=DEFAULT_GPS_TARGET_HZ)
 
     # Make timestamps UTC-aware.
     # gopro-dashboard.py compares timeseries dates with video file dates (timezone-aware UTC).
