@@ -518,21 +518,17 @@ class UnifiedApp {
 
         // Export button
         const exportBtn = document.getElementById('btn-export');
-        if (exportBtn) {
-            exportBtn.addEventListener('click', () => this._exportXML());
-        }
+        window.Busy.onClick(exportBtn, () => this._exportXML(), { label: 'Exporting…' });
 
-        // Generate command button
+        // Generate command button. Building the command reads the whole GPS
+        // stream for a DJI clip, so this is minutes of work behind one click.
         const cmdBtn = document.getElementById('btn-generate-cmd');
-        if (cmdBtn) {
-            cmdBtn.addEventListener('click', () => this._showCommandModal());
-        }
+        window.Busy.onClick(cmdBtn, () => this._showCommandModal(), { label: 'Building…' });
 
         // Render video button
+        // Opening the render modal checks the output files first.
         const renderBtn = document.getElementById('btn-render');
-        if (renderBtn) {
-            renderBtn.addEventListener('click', () => this._handleRenderClick());
-        }
+        window.Busy.onClick(renderBtn, () => this._handleRenderClick(), { label: 'Checking…' });
 
         // Batch render button
         const batchRenderBtn = document.getElementById('btn-batch-render');
@@ -770,6 +766,10 @@ class UnifiedApp {
         this._timeSyncAbortController = new AbortController();
         const { signal } = this._timeSyncAbortController;
 
+        // Nothing on screen changes until the answer arrives, and reading GPS
+        // out of a large clip is not instant - say so in the status bar.
+        this.showStatus('Checking time alignment…');
+
         try {
             const response = await fetch('/api/time-sync/analyze', {
                 method: 'POST',
@@ -794,6 +794,11 @@ class UnifiedApp {
             console.warn('Time sync analysis failed:', error);
             this.state.timeSyncInfo = null;
             this.state.emit('timeSyncInfo:changed', null);
+        } finally {
+            // An aborted run returns above, leaving the status to its successor.
+            if (!signal.aborted) {
+                this.showStatus('Ready');
+            }
         }
     }
 

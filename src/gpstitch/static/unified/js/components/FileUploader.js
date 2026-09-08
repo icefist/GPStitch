@@ -158,11 +158,12 @@ class FileUploader {
             this._setupDropZone(this.gpsDropZone, this.gpsFileInput, 'gps');
         }
 
-        // Clear buttons
+        // Clear buttons. Removing a file talks to the server, so the button
+        // shows it is working rather than looking like the click was missed.
         document.querySelectorAll('.file-clear-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const field = e.target.dataset.field;
-                this._clearFile(field);
+                window.Busy.run(btn, () => this._clearFile(field));
             });
         });
 
@@ -355,6 +356,49 @@ class FileUploader {
         }
     }
 
+    /**
+     * Show how far a file upload has got, in its own drop zone.
+     *
+     * @param {'video'|'gps'} type
+     * @param {string} fileName
+     * @param {number|null} fraction - 0..1, or null when the size is unknown
+     */
+    _showUploadProgress(type, fileName, fraction) {
+        const zone = document.getElementById(`${type}-drop-zone`);
+        if (!zone) return;  // Local mode has path inputs, not drop zones.
+
+        let bar = zone.querySelector('.upload-progress-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'upload-progress-bar';
+            bar.appendChild(document.createElement('span'));
+            zone.appendChild(bar);
+        }
+        const percent = fraction === null ? null : Math.round(fraction * 100);
+        bar.firstChild.style.width = percent === null ? '100%' : `${percent}%`;
+        bar.classList.toggle('indeterminate', percent === null);
+
+        const text = zone.querySelector('.drop-zone-text');
+        if (text) {
+            text.textContent = percent === null
+                ? `Uploading ${fileName}…`
+                : `Uploading ${fileName} — ${percent}%`;
+        }
+        zone.classList.add('uploading');
+    }
+
+    /** Take the upload bar back down, however the upload ended. */
+    _clearUploadProgress(type) {
+        const zone = document.getElementById(`${type}-drop-zone`);
+        if (!zone) return;
+        zone.classList.remove('uploading');
+        zone.querySelector('.upload-progress-bar')?.remove();
+        const text = zone.querySelector('.drop-zone-text');
+        if (text) {
+            text.textContent = type === 'video' ? 'Drop MP4/MOV or click' : 'Drop GPX/FIT/SRT or click';
+        }
+    }
+
     async _uploadFile(file, type) {
         const validExtensions = type === 'video' ? ['.mp4', '.mov'] : ['.gpx', '.fit', '.srt'];
         const ext = '.' + file.name.split('.').pop().toLowerCase();
@@ -374,6 +418,11 @@ class FileUploader {
             const formData = new FormData();
             formData.append('file', file);
 
+            // A multi-GB video uploads in silence otherwise - fetch reports
+            // nothing until the whole body has gone.
+            const report = (fraction) => this._showUploadProgress(type, file.name, fraction);
+            report(0);
+
             let response;
 
             if (type === 'video') {
@@ -382,22 +431,13 @@ class FileUploader {
                 if (this.state.sessionId && (hasGpsPrimary || (hasVideo && hasSecondary))) {
                     formData.append('session_id', this.state.sessionId);
                 }
-                response = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
+                response = await window.Upload.post('/api/upload', formData, report);
             } else {
                 if (hasVideo && this.state.sessionId) {
                     formData.append('session_id', this.state.sessionId);
-                    response = await fetch('/api/upload-secondary', {
-                        method: 'POST',
-                        body: formData
-                    });
+                    response = await window.Upload.post('/api/upload-secondary', formData, report);
                 } else {
-                    response = await fetch('/api/upload', {
-                        method: 'POST',
-                        body: formData
-                    });
+                    response = await window.Upload.post('/api/upload', formData, report);
                 }
             }
 
@@ -422,6 +462,8 @@ class FileUploader {
         } catch (error) {
             console.error('Upload failed:', error);
             alert(error.message);
+        } finally {
+            this._clearUploadProgress(type);
         }
     }
 

@@ -81,7 +81,7 @@ class TemplateManager {
         // Save button
         const saveBtn = document.getElementById('btn-save-template');
         if (saveBtn) {
-            saveBtn.addEventListener('click', () => this.saveTemplate());
+            window.Busy.onClick(saveBtn, () => this.saveTemplate(), { label: 'Saving…' });
         }
 
         // Upload button and file input
