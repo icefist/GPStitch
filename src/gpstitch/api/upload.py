@@ -1,5 +1,6 @@
 """Upload API endpoint."""
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -93,7 +94,7 @@ async def use_local_file(request: LocalFileRequest) -> UploadResponse:
 
     if file_type == "video":
         try:
-            video_metadata = extract_video_metadata(file_path)
+            video_metadata = await asyncio.to_thread(extract_video_metadata, file_path)
         except Exception as e:
             logger.error(f"Failed to extract video metadata: {e}")
             if not reuse_session and not replace_video:
@@ -106,14 +107,14 @@ async def use_local_file(request: LocalFileRequest) -> UploadResponse:
         # Analyze GPS quality if video has GPS data
         if video_metadata and video_metadata.has_gps:
             try:
-                gps_quality = analyze_gps_quality(file_path)
+                gps_quality = await asyncio.to_thread(analyze_gps_quality, file_path)
             except Exception as e:
                 logger.warning(f"Failed to analyze GPS quality: {e}")
                 # Don't fail the upload, just skip GPS quality analysis
 
     elif file_type in ("gpx", "fit", "srt"):
         try:
-            gpx_fit_metadata = extract_gpx_fit_metadata(file_path)
+            gpx_fit_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, file_path)
         except Exception as e:
             logger.error(f"Failed to extract GPX/FIT metadata: {e}")
             if not reuse_session and not replace_video:
@@ -125,7 +126,7 @@ async def use_local_file(request: LocalFileRequest) -> UploadResponse:
 
         # Analyze GPS quality for external telemetry file
         try:
-            gps_quality = analyze_external_gps_quality(file_path)
+            gps_quality = await asyncio.to_thread(analyze_external_gps_quality, file_path)
         except Exception as e:
             logger.warning(f"Failed to analyze GPS quality: {e}")
 
@@ -149,11 +150,11 @@ async def use_local_file(request: LocalFileRequest) -> UploadResponse:
             auto_secondary = _find_matching_telemetry(file_path)
             if auto_secondary:
                 try:
-                    secondary_metadata = extract_gpx_fit_metadata(auto_secondary)
+                    secondary_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, auto_secondary)
                     secondary_type = get_file_type(auto_secondary)
                     secondary_quality = None
                     try:
-                        secondary_quality = analyze_external_gps_quality(auto_secondary)
+                        secondary_quality = await asyncio.to_thread(analyze_external_gps_quality, auto_secondary)
                     except Exception as e:
                         logger.warning(f"Failed to analyze GPS quality for auto-detected file: {e}")
                     file_manager.remove_file_by_role(session_id, FileRole.SECONDARY)
@@ -215,11 +216,11 @@ async def use_local_file(request: LocalFileRequest) -> UploadResponse:
         auto_secondary = _find_matching_telemetry(file_path)
         if auto_secondary:
             try:
-                secondary_metadata = extract_gpx_fit_metadata(auto_secondary)
+                secondary_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, auto_secondary)
                 secondary_type = get_file_type(auto_secondary)
                 secondary_quality = None
                 try:
-                    secondary_quality = analyze_external_gps_quality(auto_secondary)
+                    secondary_quality = await asyncio.to_thread(analyze_external_gps_quality, auto_secondary)
                 except Exception as e:
                     logger.warning(f"Failed to analyze GPS quality for auto-detected file: {e}")
                 secondary_info = file_manager.add_file(
@@ -300,7 +301,7 @@ async def use_local_secondary_file(request: SecondaryFileRequest) -> UploadRespo
     gpx_fit_metadata = None
 
     try:
-        gpx_fit_metadata = extract_gpx_fit_metadata(file_path)
+        gpx_fit_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, file_path)
     except Exception as e:
         logger.error(f"Failed to extract GPX/FIT metadata: {e}")
         raise HTTPException(
@@ -311,7 +312,7 @@ async def use_local_secondary_file(request: SecondaryFileRequest) -> UploadRespo
     # Analyze GPS quality for external telemetry file
     gps_quality = None
     try:
-        gps_quality = analyze_external_gps_quality(file_path)
+        gps_quality = await asyncio.to_thread(analyze_external_gps_quality, file_path)
     except Exception as e:
         logger.warning(f"Failed to analyze GPS quality for secondary file: {e}")
 
@@ -410,7 +411,7 @@ async def upload_file(
 
     if file_type == "video":
         try:
-            video_metadata = extract_video_metadata(file_path)
+            video_metadata = await asyncio.to_thread(extract_video_metadata, file_path)
         except Exception as e:
             logger.error(f"Failed to extract video metadata: {e}")
             if not reuse_session and not replace_video:
@@ -425,14 +426,14 @@ async def upload_file(
         # Analyze GPS quality if video has GPS data
         if video_metadata and video_metadata.has_gps:
             try:
-                gps_quality = analyze_gps_quality(file_path)
+                gps_quality = await asyncio.to_thread(analyze_gps_quality, file_path)
             except Exception as e:
                 logger.warning(f"Failed to analyze GPS quality: {e}")
                 # Don't fail the upload, just skip GPS quality analysis
 
     elif file_type in ("gpx", "fit", "srt"):
         try:
-            gpx_fit_metadata = extract_gpx_fit_metadata(file_path)
+            gpx_fit_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, file_path)
         except Exception as e:
             logger.error(f"Failed to extract GPX/FIT metadata: {e}")
             if not reuse_session and not replace_video:
@@ -446,7 +447,7 @@ async def upload_file(
 
         # Analyze GPS quality for external telemetry file
         try:
-            gps_quality = analyze_external_gps_quality(file_path)
+            gps_quality = await asyncio.to_thread(analyze_external_gps_quality, file_path)
         except Exception as e:
             logger.warning(f"Failed to analyze GPS quality: {e}")
 
@@ -554,7 +555,7 @@ async def upload_secondary_file(
     gpx_fit_metadata = None
 
     try:
-        gpx_fit_metadata = extract_gpx_fit_metadata(file_path)
+        gpx_fit_metadata = await asyncio.to_thread(extract_gpx_fit_metadata, file_path)
     except Exception as e:
         logger.error(f"Failed to extract GPX/FIT metadata: {e}")
         # Remove the file
@@ -567,7 +568,7 @@ async def upload_secondary_file(
     # Analyze GPS quality for external telemetry file
     gps_quality = None
     try:
-        gps_quality = analyze_external_gps_quality(file_path)
+        gps_quality = await asyncio.to_thread(analyze_external_gps_quality, file_path)
     except Exception as e:
         logger.warning(f"Failed to analyze GPS quality for secondary file: {e}")
 

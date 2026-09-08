@@ -1,5 +1,8 @@
 """Command generation API endpoint."""
 
+import asyncio
+import functools
+
 from fastapi import APIRouter, HTTPException
 
 from gpstitch.models.schemas import CommandRequest, CommandResponse
@@ -28,8 +31,11 @@ async def generate_command(request: CommandRequest) -> CommandResponse:
         gpx_merge_mode = request.gpx_fit_options.merge_mode
         video_time_alignment = request.gpx_fit_options.video_time_alignment
 
-    # Generate the command (temp_files are not needed for display-only use)
-    command, _temp_files = generate_cli_command(
+    # Generate the command (temp_files are not needed for display-only use).
+    # Off the event loop: for a DJI clip this reads the whole GPS stream, which
+    # is minutes of work, and the server has to stay answerable meanwhile.
+    command, _temp_files = await asyncio.to_thread(
+        functools.partial(generate_cli_command),
         session_id=request.session_id,
         output_file=request.output_filename,
         layout=request.layout,

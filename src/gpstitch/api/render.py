@@ -1,5 +1,6 @@
 """Render job API endpoints."""
 
+import asyncio
 import contextlib
 import datetime
 import logging
@@ -241,7 +242,9 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
                 )
             else:
                 try:
-                    report = analyze_gps_quality(video_path)
+                    # Off the event loop: this reads GPS from every file in the
+                    # batch, and the UI polls for progress while it happens.
+                    report = await asyncio.to_thread(analyze_gps_quality, video_path)
                     if report:
                         gps_files.append(
                             GPSFileInfo(
@@ -626,7 +629,9 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
             video_metadata = None
             if file_type == "video":
                 try:
-                    video_metadata = extract_video_metadata(video_path)
+                    # Off the event loop - ffprobe per file, and the UI is
+                    # waiting on this request to learn the batch even started.
+                    video_metadata = await asyncio.to_thread(extract_video_metadata, video_path)
                 except Exception:
                     logger.warning("Batch: could not read metadata from %s", video_path)
 
