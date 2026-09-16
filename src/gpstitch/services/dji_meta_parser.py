@@ -428,6 +428,54 @@ def derive_sample_rate(points: list[DjiMetaPoint], *, target_hz: int) -> int:
     return calc_sample_rate(len(points) / span_s, target_hz)
 
 
+def points_on_joined_timeline(
+    segments: list[tuple[list[DjiMetaPoint], float]],
+) -> list[DjiMetaPoint]:
+    """Place several clips' GPS on the timeline of those clips joined end to end.
+
+    Each segment is one clip's points and that clip's duration in seconds, in
+    play order. A clip's points are re-based onto the cumulative duration of the
+    clips before it, keeping their spacing within the clip.
+
+    Clips recorded back to back - a camera splitting one recording at a file size
+    limit - land where their own timestamps would put them anyway. Clips with a
+    real gap between them have the gap removed, because the joined video has no
+    gap either and the overlay has to match the picture rather than the clock.
+
+    A segment with no points still advances the offset, so a clip whose GPS never
+    locked leaves a hole rather than dragging everything after it earlier.
+    """
+    anchor: datetime | None = None
+    for points, _ in segments:
+        if points:
+            anchor = min(p.timestamp for p in points)
+            break
+    if anchor is None:
+        return []
+
+    joined: list[DjiMetaPoint] = []
+    offset_s = 0.0
+    next_frame_idx = 0
+
+    for points, duration_s in segments:
+        if points:
+            segment_start = min(p.timestamp for p in points)
+            base = anchor + timedelta(seconds=offset_s)
+            ordered = sorted(points, key=lambda p: p.timestamp)
+            for index, point in enumerate(ordered):
+                joined.append(
+                    dc_replace(
+                        point,
+                        timestamp=base + (point.timestamp - segment_start),
+                        frame_idx=next_frame_idx + index,
+                    )
+                )
+            next_frame_idx += len(ordered)
+        offset_s += duration_s
+
+    return joined
+
+
 # A fix that wobbles inside this much has not gone anywhere: 1e-5 degrees is
 # about 1.1m of latitude, and less in longitude at these latitudes.
 _STATIONARY_SPREAD_DEG = 1e-5
