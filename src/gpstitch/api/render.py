@@ -135,6 +135,9 @@ class PreCheckRequest(BaseModel):
 
     files: list[PreCheckFileInput] = Field(min_length=1, max_length=100)
     shared_gpx_path: str | None = None
+    # Mirrors BatchRenderRequest.merge, so the planned outputs describe the
+    # render that will actually run.
+    merge: bool = False
     ffmpeg_profile: str | None = None
     # When set, every render writes here instead of beside its source.
     output_dir: str | None = None
@@ -198,6 +201,11 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
 
     ext = get_output_extension_for_profile(request.ffmpeg_profile)
 
+    # Merging several clips yields one output named after the first of them; a
+    # single clip is never merged and keeps its ordinary name.
+    merging = request.merge and len(request.files) > 1
+    merged_stem = Path(request.files[0].video_path).stem if merging else ""
+
     for file_input in request.files:
         video_path = Path(file_input.video_path).expanduser().resolve()
 
@@ -213,9 +221,15 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
 
         # Check overwrite conflict against the folder we will actually write to.
         output_dir = Path(request.output_dir) if request.output_dir else video_path.parent
-        output_path = output_dir / f"{video_path.stem}_overlay{ext}"
+        if merging:
+            # A merged batch writes one file, named after the first clip, however
+            # many clips feed it. Reporting a conflict per clip would warn about
+            # files that will never be written.
+            output_path = output_dir / f"{merged_stem}_merged_overlay{ext}"
+        else:
+            output_path = output_dir / f"{video_path.stem}_overlay{ext}"
         planned_outputs.setdefault(str(output_path), []).append(str(video_path))
-        if output_path.exists():
+        if output_path.exists() and not any(c.output_path == str(output_path) for c in overwrite_conflicts):
             overwrite_conflicts.append(
                 OverwriteConflict(
                     video_path=str(video_path),
@@ -280,11 +294,18 @@ async def pre_check_batch_files(request: PreCheckRequest) -> PreCheckResponse:
                 )
             )
 
-    duplicate_outputs = [
-        DuplicateOutput(output_path=output_path, video_paths=sources)
-        for output_path, sources in planned_outputs.items()
-        if len(sources) > 1
-    ]
+    # Several inputs sharing one output is a collision that would discard a
+    # finished render - unless merging, where feeding one output from every clip
+    # is the whole point.
+    duplicate_outputs = (
+        []
+        if merging
+        else [
+            DuplicateOutput(output_path=output_path, video_paths=sources)
+            for output_path, sources in planned_outputs.items()
+            if len(sources) > 1
+        ]
+    )
 
     return PreCheckResponse(
         total_files=len(request.files),
