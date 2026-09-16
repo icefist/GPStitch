@@ -16,7 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from gopro_overlay import timeseries_process
-from PIL import Image, ImageFont
+from PIL import Image
 
 from gpstitch.config import settings
 from gpstitch.constants import (
@@ -31,6 +31,7 @@ from gpstitch.constants import (
     UNIT_OPTIONS,
     is_pycairo_available,
 )
+from gpstitch.fonts import GOPRO_DEFAULT_FONT, find_available_font, load_font_with_fallback
 from gpstitch.patches.place_patches import preview_budget
 from gpstitch.scripts.gopro_dashboard_wrapper import (
     TS_DJI_META_SOURCE_ARG,
@@ -49,61 +50,6 @@ if settings.enable_gopro_patches:
 
 # Thread pool for running sync code that uses asyncio (geotiler)
 _executor = ThreadPoolExecutor(max_workers=2)
-
-
-# Shared font list for consistency between preview and CLI render
-_FONTS_TO_TRY = [
-    # Standard Roboto font (may be installed)
-    "Roboto-Medium.ttf",
-    # macOS system fonts
-    "/Library/Fonts/SF-Pro.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/Geneva.ttf",
-    "/System/Library/Fonts/Monaco.ttf",
-    "/Library/Fonts/Arial.ttf",
-    # Linux common fonts
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    # Windows fonts
-    "C:/Windows/Fonts/arial.ttf",
-    # Generic names (PIL will search system paths)
-    "Arial",
-    "Helvetica",
-]
-
-
-def _find_available_font() -> str | None:
-    """Find an available font file. Used by both preview and CLI render."""
-    from pathlib import Path
-
-    for font in _FONTS_TO_TRY:
-        path = Path(font)
-        if path.is_absolute() and path.exists():
-            return str(path)
-        # For non-absolute paths, try to find via font loader
-        try:
-            from gopro_overlay.font import load_font
-
-            load_font(font)
-            return font  # Font name is valid
-        except (OSError, ImportError):
-            continue
-
-    return None
-
-
-def _load_font_with_fallback():
-    """Load font with fallback to system fonts. Uses same list as CLI."""
-    from gopro_overlay.font import load_font
-
-    for font_name in _FONTS_TO_TRY:
-        try:
-            return load_font(font_name)
-        except OSError:
-            continue
-
-    # Last resort - use default PIL font
-    return ImageFont.load_default()
 
 
 @dataclass
@@ -1432,7 +1378,7 @@ def render_preview(
 
     with MapRenderer(cache_dir, styler).open(style) as renderer:
         # Load font with fallback
-        font = _load_font_with_fallback()
+        font = load_font_with_fallback()
 
         # Privacy zone
         privacy = NoPrivacyZone()
@@ -1640,7 +1586,7 @@ def _render_layout_with_data(
     style = map_style or "osm"
 
     with MapRenderer(cache_dir, styler).open(style) as renderer:
-        font = _load_font_with_fallback()
+        font = load_font_with_fallback()
         privacy = NoPrivacyZone()
 
         if suffix in (".mp4", ".mov"):
@@ -1702,7 +1648,7 @@ def _render_layout_placeholder(xml_content: str, width: int, height: int) -> byt
 
     # Add text overlay
     try:
-        font = _load_font_with_fallback()
+        font = load_font_with_fallback()
         text = "Upload a file to see actual preview"
         bbox = draw.textbbox((0, 0), text, font=font)
         text_width = bbox[2] - bbox[0]
@@ -2135,8 +2081,8 @@ def generate_cli_command(
         cmd_parts.append(f"--map-style {shlex.quote(map_style)}")
 
     # Add font option (auto-detect if Roboto-Medium.ttf is not available)
-    font_path = _find_available_font()
-    if font_path and font_path != "Roboto-Medium.ttf":
+    font_path = find_available_font()
+    if font_path and font_path != GOPRO_DEFAULT_FONT:
         cmd_parts.append(f"--font {shlex.quote(font_path)}")
 
     # Add FFmpeg profile if specified
