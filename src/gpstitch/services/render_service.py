@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 from datetime import UTC
 from pathlib import Path
@@ -37,6 +38,9 @@ class RenderService:
         # writing a GPX takes minutes, and there is no subprocess to signal yet.
         self._preparing_job_id: str | None = None
         self._cancelled_while_preparing: set[str] = set()
+        # The ffmpeg joining a merged batch's clips. Tracked so a cancel can
+        # kill a copy that would otherwise run for a quarter of an hour.
+        self._join_process: subprocess.Popen | None = None
 
     def _discard_preparation(
         self,
@@ -371,10 +375,39 @@ class RenderService:
             with contextlib.suppress(Exception):
                 future.result(timeout=5.0)
 
-        # Generate CLI command off the event loop: it is synchronous and slow, and
-        # blocking here would stall status polling, log fetches and cancellation.
         async with self._lock:
             self._preparing_job_id = job_id
+
+        # A merged batch owns several clips. Joining them and combining their GPS
+        # has to happen before the command is built, because what the command
+        # renders is the joined file, not the clips.
+        merge_temp_files: list[str] = []
+        if config.merge_sources:
+            from gpstitch.services.merge_preparation import prepare_merged_source
+            from gpstitch.services.video_merge import MergeNotPossible
+
+            def register_join(process) -> None:
+                self._join_process = process
+
+            try:
+                merge_temp_files = await asyncio.to_thread(
+                    prepare_merged_source,
+                    config,
+                    Path(config.output_file).parent,
+                    on_progress,
+                    register_join,
+                )
+            except (MergeNotPossible, ValueError) as e:
+                await job_manager.append_job_log(job_id, f"ERROR: {e}")
+                await job_manager.update_job_status(job_id, JobStatus.FAILED, str(e))
+                logger.error("Merge failed for job %s: %s", job_id, e)
+                await _clear_current_job()
+                return
+            finally:
+                self._join_process = None
+
+        # Generate CLI command off the event loop: it is synchronous and slow, and
+        # blocking here would stall status polling, log fetches and cancellation.
         try:
             command, srt_gpx_temp_files = await asyncio.to_thread(
                 functools.partial(
@@ -604,6 +637,9 @@ class RenderService:
                 self._cleanup_temp_file(pillarbox_temp_file)
             for temp_gpx in srt_gpx_temp_files:
                 self._cleanup_temp_file(temp_gpx)
+            # The joined clip and its combined GPX are inputs, not deliverables.
+            for temp_file in merge_temp_files:
+                self._cleanup_temp_file(temp_file)
             async with self._lock:
                 self._process = None
                 self._current_job_id = None
@@ -736,6 +772,12 @@ class RenderService:
             return False
 
         if not self._process:
+            # A merged batch may be in the middle of an eighteen-minute copy.
+            if self._join_process is not None:
+                with contextlib.suppress(Exception):
+                    self._join_process.kill()
+                logger.info("Killed the clip join for cancelled job %s", job_id)
+
             # Still building the command - there is no subprocess to signal, so
             # record the request and let start_render honour it at the next
             # checkpoint. The GPS extraction already in flight runs to completion.
