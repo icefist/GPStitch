@@ -61,6 +61,13 @@ class RenderJobConfig(BaseModel):
     gps_dop_max: float = DEFAULT_GPS_DOP_MAX
     gps_speed_max: float = DEFAULT_GPS_SPEED_MAX
     odo_offset: float | None = None  # Initial odometer value in meters (for shared GPX batch)
+    # Clips to join into one video before rendering, in play order. Set only for
+    # a merged batch; the joined file becomes the session's primary during the
+    # job's preparation.
+    merge_sources: list[str] | None = None
+    # A track supplied for the whole batch. When set it replaces the clips' own
+    # embedded GPS, so no extraction is needed.
+    shared_gpx_path: str | None = None
 
     @field_validator("video_time_alignment", mode="before")
     @classmethod

@@ -475,6 +475,9 @@ class BatchRenderRequest(BaseModel):
 
     files: list[BatchFileInput] = Field(min_length=1)
     shared_gpx_path: str | None = None
+    # Join the selected clips into one video and render it once, so the journey
+    # map does not restart at every file boundary.
+    merge: bool = False
     # Folder to write every output into; per-file output_path still wins.
     output_dir: str | None = None
     layout: str = "default-1920x1080"
@@ -592,6 +595,47 @@ async def start_batch_render(request: BatchRenderRequest, background_tasks: Back
     from gpstitch.services.renderer import get_output_extension_for_profile
 
     ext = get_output_extension_for_profile(request.ffmpeg_profile)
+
+    # A merged batch is one job that owns every clip, so the whole ride shares a
+    # single continuous track and its journey map never restarts. One clip needs
+    # no join and falls through to the normal path below.
+    merge_paths = [Path(f.video_path) for f in request.files if Path(f.video_path).exists()]
+    if request.merge and len(merge_paths) > 1:
+        session_id = file_manager.create_local_session(skip_cleanup=True)
+        first = merge_paths[0]
+        merged_dir = Path(request.output_dir) if request.output_dir else first.parent
+        config = RenderJobConfig(
+            session_id=session_id,
+            layout=request.layout,
+            layout_xml_path=request.layout_xml_path,
+            output_file=str(merged_dir / f"{first.stem}_merged_overlay{ext}"),
+            units_speed=request.units_speed,
+            units_altitude=request.units_altitude,
+            units_distance=request.units_distance,
+            units_temperature=request.units_temperature,
+            map_style=request.map_style,
+            gpx_merge_mode=request.gpx_merge_mode,
+            # The joined file carries no embedded GPS - ffmpeg cannot remux the
+            # DJI telemetry stream - so it renders against the combined GPX. This
+            # alignment mode makes render_service take the video's start from
+            # that GPX rather than from a creation time the join invented.
+            video_time_alignment="file-modified",
+            time_offset_seconds=request.time_offset_seconds,
+            ffmpeg_profile=request.ffmpeg_profile,
+            gps_dop_max=request.gps_dop_max,
+            gps_speed_max=request.gps_speed_max,
+            merge_sources=[str(p) for p in merge_paths],
+            shared_gpx_path=request.shared_gpx_path,
+        )
+        job = await job_manager.create_job_with_batch(config, batch_id=batch_id)
+        background_tasks.add_task(render_service.start_render, job.id, job.config)
+        logger.info("Created merged batch %s from %d clips", batch_id, len(merge_paths))
+        return BatchRenderResponse(
+            batch_id=batch_id,
+            job_ids=[job.id],
+            total_jobs=1,
+            skipped_files=[str(Path(f.video_path)) for f in request.files if not Path(f.video_path).exists()],
+        )
 
     for file_input in request.files:
         video_path = Path(file_input.video_path)
