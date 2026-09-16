@@ -25,6 +25,8 @@ powerful [gopro-overlay](https://github.com/time4tea/gopro-dashboard-overlay) li
 - **Template Management** — Save and load custom templates
 - **Batch Rendering** — Process multiple files with the same settings
 - **Shared GPX Batch Render** — Apply a single GPX track to multiple videos with automatic odometer offset per video
+- **Merged Batch Render** — Join a ride's clips into one video and render it once, so the journey map,
+  odometer and place names run across the whole ride instead of restarting at every file boundary
 - **Background Jobs** — Render videos in the background with progress tracking
 - **Overlay-Only Mode** — Render transparent telemetry overlays (no video) for compositing in Final Cut Pro, DaVinci
   Resolve, etc.
@@ -72,6 +74,21 @@ Process multiple videos at once with the same overlay settings.
 <img src="https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/batch_create.png" width="400" alt="Batch Create"/>
 <img src="https://raw.githubusercontent.com/Romancha/GPStitch/main/docs/images/batch_progress.png" width="400" alt="Batch Progress"/>
 </p>
+
+### Merging a Split Ride
+
+Action cameras split a long recording into several files. Rendered separately,
+each one gets its own journey map, so the joins are visible in the finished
+video.
+
+Tick **Merge into one video** in the batch dialog and the selected clips are
+joined losslessly, their GPS is combined onto a single timeline, and one video is
+rendered from the result — the map, odometer and place names run across the whole
+ride. The joined source is removed afterwards; the output is the single rendered
+file.
+
+Every clip must share a resolution and codec, and the drive needs free space
+equal to the clips' combined size while the render runs.
 
 ### Shared GPX Batch Render
 

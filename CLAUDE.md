@@ -53,6 +53,11 @@ render is usually a patch that only one side applied.
 video), 4. DJI Action with embedded GPS — which extracts the protobuf stream to
 a temp GPX and renders with `--use-gpx-only`.
 
+A merged batch is mode 2 in disguise: the clips are joined into one file during
+the job's preparation (`services/merge_preparation.py`) and rendered against a
+GPX combining every clip's GPS, because ffmpeg cannot carry the DJI telemetry
+stream through a concat.
+
 **Request flow for a render:** `api/render.py` creates a session in
 `services/file_manager.py`, a job in `services/job_manager.py`, then hands off to
 `render_service`. Jobs persist as JSON under `$TMPDIR/gpstitch/jobs/` and carry

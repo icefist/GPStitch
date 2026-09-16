@@ -56,6 +56,18 @@ class BatchRenderModal {
                                 <small class="form-hint">Adjust time alignment between video and GPS track</small>
                             </div>
 
+                            <div class="form-group">
+                                <label class="batch-merge-option">
+                                    <input type="checkbox" id="batch-merge-toggle">
+                                    <span>Merge into one video</span>
+                                </label>
+                                <small class="form-hint">
+                                    Joins the selected clips end to end and renders them once, so the map,
+                                    odometer and place names run across the whole ride instead of restarting
+                                    at every file. Needs free disk equal to the clips' combined size while it runs.
+                                </small>
+                            </div>
+
                             <p class="help-text" id="batch-help-text">
                                 Enter file paths, one per line.<br>
                                 For video + GPX/FIT pairs, separate with comma.
@@ -614,7 +626,7 @@ class BatchRenderModal {
      * Call pre-check API to get overwrite conflicts and GPS issues
      */
     async _preCheckFiles(files) {
-        const payload = { files: files };
+        const payload = { files: files, merge: this._isMergeEnabled() };
         const sharedGpx = this.sharedGpxInput?.value?.trim();
         if (sharedGpx) {
             payload.shared_gpx_path = sharedGpx;
@@ -684,6 +696,7 @@ class BatchRenderModal {
 
         const request = {
             files: files,
+            merge: this._isMergeEnabled(),
             shared_gpx_path: sharedGpxPath,
             layout: layout,
             layout_xml_path: layoutXmlPath,
@@ -934,6 +947,11 @@ class BatchRenderModal {
         } else {
             return `${secs}s`;
         }
+    }
+
+    /** Whether the selected clips should be joined into one rendered video. */
+    _isMergeEnabled() {
+        return Boolean(document.getElementById('batch-merge-toggle')?.checked);
     }
 
     open() {
