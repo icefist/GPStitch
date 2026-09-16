@@ -49,6 +49,39 @@ def clip_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip() or 0.0)
 
 
+# How much progress has to accumulate before it is worth another log line. The
+# job log keeps its last 500 lines, and ffmpeg reports far more often than that
+# allows - every update would push the useful lines out.
+_PROGRESS_STEP_PERCENT = 10
+
+
+def _percentage_reporter(
+    label: str,
+    duration_s: float,
+    on_progress: Callable[[str], None],
+) -> Callable[[float], None] | None:
+    """Turn seconds-processed into occasional "label — NN%" lines.
+
+    Returns None when the duration is unknown, which leaves the extraction on
+    its quieter path rather than dividing by zero.
+    """
+    if duration_s <= 0:
+        return None
+
+    last_reported = -1
+
+    def report(seconds: float) -> None:
+        nonlocal last_reported
+        # ffmpeg can overshoot slightly at the end of a stream.
+        percent = min(100, int(seconds / duration_s * 100))
+        step = percent - percent % _PROGRESS_STEP_PERCENT
+        if step > last_reported:
+            last_reported = step
+            on_progress(f"{label} — {step}%")
+
+    return report
+
+
 def prepare_merged_source(
     config: RenderJobConfig,
     scratch_dir: Path,
@@ -76,8 +109,13 @@ def prepare_merged_source(
     else:
         segments = []
         for index, path in enumerate(paths, start=1):
-            on_progress(f"Reading GPS from {path.name} ({index} of {len(paths)})")
-            segments.append((parse_dji_meta_file(path), clip_duration_seconds(path)))
+            duration = clip_duration_seconds(path)
+            label = f"Reading GPS from {path.name} ({index} of {len(paths)})"
+            on_progress(label)
+            # Reading one clip takes minutes; report ffmpeg's position as a
+            # percentage rather than leaving one line on screen throughout.
+            report = _percentage_reporter(label, duration, on_progress)
+            segments.append((parse_dji_meta_file(path, on_progress=report), duration))
 
         combined = points_on_joined_timeline(segments)
         if not combined:

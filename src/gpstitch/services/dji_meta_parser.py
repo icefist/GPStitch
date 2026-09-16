@@ -23,11 +23,14 @@ Protobuf wire format per sample:
             └── f2 (float) — vy (m/s)
 """
 
+import contextlib
 import json
 import logging
 import math
 import struct
 import subprocess
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta
@@ -307,6 +310,7 @@ def extract_dji_meta_raw(
     *,
     start_s: float | None = None,
     duration_s: float | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> bytes:
     """Extract raw DJI meta stream bytes using ffmpeg.
 
@@ -320,6 +324,11 @@ def extract_dji_meta_raw(
         start_s: Seek to this offset first. Passed before -i, which seeks by
             index rather than decoding forward from the start.
         duration_s: Stop after this much content.
+        on_progress: Called with the seconds of stream processed so far. Reading
+            a whole clip takes minutes, and the caller knows the clip's duration,
+            so it can turn these into a percentage. Asking ffmpeg for progress
+            means reading two pipes at once, so the simpler path is kept for
+            callers that do not want it - preview takes tiny windows constantly.
 
     Returns:
         Raw protobuf bytes (concatenated samples)
@@ -338,11 +347,58 @@ def extract_dji_meta_raw(
         cmd += ["-t", str(duration_s)]
     cmd += ["pipe:1"]
 
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        stderr_msg = result.stderr.decode(errors="replace").strip() if result.stderr else ""
-        raise RuntimeError(f"ffmpeg failed to extract DJI meta stream from {file_path}: {stderr_msg}")
-    return result.stdout
+    if on_progress is None:
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            stderr_msg = result.stderr.decode(errors="replace").strip() if result.stderr else ""
+            raise RuntimeError(f"ffmpeg failed to extract DJI meta stream from {file_path}: {stderr_msg}")
+        return result.stdout
+
+    return _extract_with_progress(cmd, file_path, on_progress)
+
+
+# ffmpeg reports its position in microseconds, under either key depending on the
+# build. Both are microseconds despite what the second one is called.
+_PROGRESS_KEYS = ("out_time_us=", "out_time_ms=")
+
+
+def _extract_with_progress(cmd: list[str], file_path: Path, on_progress: Callable[[float], None]) -> bytes:
+    """Run the extraction, reporting ffmpeg's position as it goes.
+
+    Both pipes have to be drained concurrently: the payload comes down stdout
+    while progress comes down stderr, and letting either fill blocks ffmpeg.
+    """
+    # -progress is a global option, so it goes before the input.
+    cmd = [cmd[0], "-progress", "pipe:2", "-nostats", *cmd[1:]]
+
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
+
+    stderr_text: list[str] = []
+
+    def watch_progress() -> None:
+        while True:
+            raw = process.stderr.readline()
+            if not raw:
+                break
+            line = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+            stderr_text.append(line)
+            stripped = line.strip()
+            for key in _PROGRESS_KEYS:
+                if stripped.startswith(key):
+                    with contextlib.suppress(ValueError):
+                        on_progress(int(stripped[len(key) :]) / 1_000_000)
+                    break
+
+    watcher = threading.Thread(target=watch_progress, daemon=True)
+    watcher.start()
+
+    payload = process.stdout.read()
+    returncode = process.wait()
+    watcher.join(timeout=5.0)
+
+    if returncode != 0:
+        raise RuntimeError(f"ffmpeg failed to extract DJI meta stream from {file_path}: {''.join(stderr_text).strip()}")
+    return payload
 
 
 # --- Frozen GPS clock repair ---
@@ -738,11 +794,17 @@ def parse_dji_meta(raw_data: bytes) -> list[DjiMetaPoint]:
     return points
 
 
-def parse_dji_meta_file(file_path: Path) -> list[DjiMetaPoint]:
+def parse_dji_meta_file(
+    file_path: Path,
+    on_progress: Callable[[float], None] | None = None,
+) -> list[DjiMetaPoint]:
     """Convenience: detect DJI meta stream, extract, and parse GPS points.
 
     Args:
         file_path: Path to the video file
+        on_progress: Called with the seconds of stream read so far. This takes
+            minutes on a large clip, so a caller that knows the clip's duration
+            can turn it into a percentage.
 
     Returns:
         List of DjiMetaPoint with valid GPS data
@@ -755,7 +817,7 @@ def parse_dji_meta_file(file_path: Path) -> list[DjiMetaPoint]:
     if stream_idx is None:
         raise ValueError(f"No DJI meta stream found in {file_path}")
 
-    raw_data = extract_dji_meta_raw(file_path, stream_idx)
+    raw_data = extract_dji_meta_raw(file_path, stream_idx, on_progress=on_progress)
     points = parse_dji_meta(raw_data)
     if clock_unreliable(points, sample_rate_hz=read_declared_sample_rate(raw_data)):
         logger.info(

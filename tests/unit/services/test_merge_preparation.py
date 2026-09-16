@@ -50,7 +50,7 @@ def stubs(monkeypatch):
         lambda paths, output, on_progress=None, on_process=None: (output.write_bytes(b"\0"), output)[1],
     )
     monkeypatch.setattr(module, "clip_duration_seconds", lambda path: 10.0)
-    monkeypatch.setattr(module, "parse_dji_meta_file", lambda path: ["point"])
+    monkeypatch.setattr(module, "parse_dji_meta_file", lambda path, on_progress=None: ["point"])
     monkeypatch.setattr(module, "points_on_joined_timeline", lambda segments: ["point"])
     monkeypatch.setattr(module, "derive_sample_rate", lambda points, target_hz: 1)
     monkeypatch.setattr(
@@ -132,7 +132,7 @@ class TestPrepareMergedSource:
         from gpstitch.services.merge_preparation import prepare_merged_source
 
         called = []
-        monkeypatch.setattr(module, "parse_dji_meta_file", lambda path: called.append(path) or [])
+        monkeypatch.setattr(module, "parse_dji_meta_file", lambda path, on_progress=None: called.append(path) or [])
 
         shared = tmp_path / "ride.gpx"
         shared.write_text("<gpx/>")
@@ -188,3 +188,62 @@ class TestPrepareMergedSource:
         )
 
         assert seen == ["the-process"]
+
+
+class TestPercentageReporter:
+    """ffmpeg reports its position constantly; the job log keeps 500 lines.
+
+    Reporting every update would flood the log and push the useful lines out, so
+    progress is only announced when it has moved a visible amount.
+    """
+
+    def test_progress_is_reported_as_a_percentage(self):
+        from gpstitch.services.merge_preparation import _percentage_reporter
+
+        lines = []
+        report = _percentage_reporter("Reading GPS from a.mp4", 100.0, lines.append)
+
+        report(50.0)
+
+        assert lines == ["Reading GPS from a.mp4 — 50%"]
+
+    def test_small_advances_are_not_announced(self):
+        from gpstitch.services.merge_preparation import _percentage_reporter
+
+        lines = []
+        report = _percentage_reporter("Reading", 100.0, lines.append)
+
+        report(10.0)
+        report(11.0)
+        report(12.0)
+
+        assert lines == ["Reading — 10%"]
+
+    def test_each_visible_step_is_announced_once(self):
+        from gpstitch.services.merge_preparation import _percentage_reporter
+
+        lines = []
+        report = _percentage_reporter("Reading", 100.0, lines.append)
+
+        for second in range(0, 101, 5):
+            report(float(second))
+
+        assert lines == [f"Reading — {p}%" for p in range(0, 101, 10)]
+
+    def test_an_unknown_duration_gives_no_reporter(self):
+        """There is nothing to take a percentage of, so the extraction stays on
+        its quieter path rather than dividing by zero."""
+        from gpstitch.services.merge_preparation import _percentage_reporter
+
+        assert _percentage_reporter("Reading", 0.0, [].append) is None
+
+    def test_it_never_claims_more_than_a_hundred(self):
+        """ffmpeg can overshoot slightly at the end of a stream."""
+        from gpstitch.services.merge_preparation import _percentage_reporter
+
+        lines = []
+        report = _percentage_reporter("Reading", 10.0, lines.append)
+
+        report(12.0)
+
+        assert lines == ["Reading — 100%"]
