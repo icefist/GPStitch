@@ -31,6 +31,7 @@ def apply_patches() -> None:
 
     from gpstitch.patches.ffmpeg_gopro_patches import patch_ffmpeg_gopro
     from gpstitch.patches.ffmpeg_overlay_patches import patch_ffmpeg_overlay
+    from gpstitch.patches.journey_focus_patches import patch_journey_map_focus
     from gpstitch.patches.metric_patches import patch_metric_accessor
     from gpstitch.patches.place_patches import patch_place_widget
 
@@ -38,6 +39,7 @@ def apply_patches() -> None:
     patch_ffmpeg_overlay()
     patch_metric_accessor()
     patch_place_widget()
+    patch_journey_map_focus()
 
     _patches_applied = True
     logger.info("gopro_overlay runtime patches applied successfully")

@@ -196,3 +196,80 @@ class TestDegenerateInputs:
         track = build_place_track(_straight_track(), FlakyResolver(), "en", 500, 11, 400)
         assert len(track.samples) == 10  # 11 attempted, 1 failed
         assert track.at(T0) == "Bath"
+
+
+class TestSettlementLookup:
+    """Telling a village/town/city from a county or country.
+
+    The map zooms in when you are inside a settlement, and `at()` returns only a
+    display string - which cannot distinguish "Groningen the city" from
+    "Groningen the province" once it has been flattened.
+    """
+
+    def _track(self, place):
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_resolver import Backend
+        from gpstitch.services.place_track import PlaceSample, PlaceTrack
+
+        return PlaceTrack(
+            [PlaceSample(dt=datetime(2026, 9, 13, 14, 0, tzinfo=UTC), place=place, backend=Backend.CITIES)]
+        )
+
+    def test_a_village_is_a_settlement(self):
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_resolver import PlaceName
+
+        track = self._track(PlaceName(village="Giethoorn", country="Netherlands"))
+
+        assert track.in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is True
+
+    def test_a_town_is_a_settlement(self):
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_resolver import PlaceName
+
+        track = self._track(PlaceName(town="Bath", country="England"))
+
+        assert track.in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is True
+
+    def test_a_city_is_a_settlement(self):
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_resolver import PlaceName
+
+        track = self._track(PlaceName(city="Groningen", country="Netherlands"))
+
+        assert track.in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is True
+
+    def test_open_country_is_not_a_settlement(self):
+        """Between places only the wider administrative names resolve."""
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_resolver import PlaceName
+
+        track = self._track(PlaceName(county="Drenthe", country="Netherlands"))
+
+        assert track.in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is False
+
+    def test_an_unresolved_point_is_not_a_settlement(self):
+        from datetime import UTC, datetime
+
+        track = self._track(None)
+
+        assert track.in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is False
+
+    def test_no_samples_is_not_a_settlement(self):
+        from datetime import UTC, datetime
+
+        from gpstitch.services.place_track import PlaceTrack
+
+        assert PlaceTrack([]).in_settlement(datetime(2026, 9, 13, 14, 1, tzinfo=UTC)) is False
+
+    def test_no_time_is_not_a_settlement(self):
+        from gpstitch.services.place_resolver import PlaceName
+
+        track = self._track(PlaceName(city="Groningen"))
+
+        assert track.in_settlement(None) is False

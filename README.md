@@ -27,6 +27,8 @@ powerful [gopro-overlay](https://github.com/time4tea/gopro-dashboard-overlay) li
 - **Shared GPX Batch Render** — Apply a single GPX track to multiple videos with automatic odometer offset per video
 - **Merged Batch Render** — Join a ride's clips into one video and render it once, so the journey map,
   odometer and place names run across the whole ride instead of restarting at every file boundary
+- **Settlement Focus** — Give `journey_map` a `town_zoom` and it frames the route through the village, town
+  or city you are currently in, returning to the whole ride between places
 - **Background Jobs** — Render videos in the background with progress tracking
 - **Overlay-Only Mode** — Render transparent telemetry overlays (no video) for compositing in Final Cut Pro, DaVinci
   Resolve, etc.

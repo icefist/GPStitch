@@ -19,6 +19,10 @@ from datetime import datetime
 
 from gpstitch.services.place_resolver import Backend, PlaceName
 
+# The names that mean somewhere built up. The rest of the hierarchy -
+# municipality, county, state, country - resolves on open road too.
+_SETTLEMENT_FIELDS = ("village", "town", "city")
+
 logger = logging.getLogger(__name__)
 
 # Nominal speed used to convert the metre target into a time threshold for
@@ -50,13 +54,33 @@ class PlaceTrack:
 
     def at(self, dt: datetime | None) -> str:
         """Name in effect at `dt`. Always a str, never None."""
+        place = self.place_at(dt)
+        return place.display_name() if place is not None else ""
+
+    def place_at(self, dt: datetime | None) -> PlaceName | None:
+        """The resolved hierarchy in effect at `dt`, unflattened.
+
+        `at()` loses the distinction between a city and the province sharing its
+        name, which callers that care about *what kind* of place this is - the
+        map, deciding whether to zoom - need to keep.
+        """
         if not self.samples or dt is None:
-            return ""
+            return None
         idx = bisect.bisect_right(self._dts, dt) - 1
         if idx < 0:
             idx = 0  # before the first sample: hold the first known name
-        place = self.samples[idx].place
-        return place.display_name() if place is not None else ""
+        return self.samples[idx].place
+
+    def in_settlement(self, dt: datetime | None) -> bool:
+        """Whether `dt` falls inside a village, town or city.
+
+        The wider names - county, state, country - resolve everywhere, including
+        open road, so they say nothing about being somewhere built up.
+        """
+        place = self.place_at(dt)
+        if place is None:
+            return False
+        return any(getattr(place, field, None) for field in _SETTLEMENT_FIELDS)
 
 
 def _ordered_entries(framemeta) -> list:
