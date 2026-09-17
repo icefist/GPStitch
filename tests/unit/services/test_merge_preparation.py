@@ -160,6 +160,28 @@ class TestPrepareMergedSource:
 
         assert str(shared) not in temps
 
+    def test_a_failed_join_leaves_nothing_behind(self, clips, tmp_path, stubs, monkeypatch):
+        """A cancelled join has already written gigabytes of the joined file.
+
+        Nothing downstream can clean it up: the temp paths are returned, and a
+        failure returns nothing - so a few cancellations would fill the disk the
+        render itself needs.
+        """
+        from gpstitch.services import merge_preparation as module
+        from gpstitch.services.merge_preparation import prepare_merged_source
+        from gpstitch.services.video_merge import MergeNotPossible
+
+        def fail_halfway(paths, output, on_progress=None, on_process=None):
+            output.write_bytes(b"\0" * 4096)
+            raise MergeNotPossible("cancelled")
+
+        monkeypatch.setattr(module, "join_clips", fail_halfway)
+
+        with pytest.raises(MergeNotPossible):
+            prepare_merged_source(_config([str(c) for c in clips]), tmp_path, on_progress=lambda m: None)
+
+        assert list(tmp_path.glob("gpstitch_merged_*")) == []
+
     def test_clips_without_any_gps_are_refused(self, clips, tmp_path, stubs, monkeypatch):
         from gpstitch.services import merge_preparation as module
         from gpstitch.services.merge_preparation import prepare_merged_source
@@ -188,62 +210,3 @@ class TestPrepareMergedSource:
         )
 
         assert seen == ["the-process"]
-
-
-class TestPercentageReporter:
-    """ffmpeg reports its position constantly; the job log keeps 500 lines.
-
-    Reporting every update would flood the log and push the useful lines out, so
-    progress is only announced when it has moved a visible amount.
-    """
-
-    def test_progress_is_reported_as_a_percentage(self):
-        from gpstitch.services.merge_preparation import _percentage_reporter
-
-        lines = []
-        report = _percentage_reporter("Reading GPS from a.mp4", 100.0, lines.append)
-
-        report(50.0)
-
-        assert lines == ["Reading GPS from a.mp4 — 50%"]
-
-    def test_small_advances_are_not_announced(self):
-        from gpstitch.services.merge_preparation import _percentage_reporter
-
-        lines = []
-        report = _percentage_reporter("Reading", 100.0, lines.append)
-
-        report(10.0)
-        report(11.0)
-        report(12.0)
-
-        assert lines == ["Reading — 10%"]
-
-    def test_each_visible_step_is_announced_once(self):
-        from gpstitch.services.merge_preparation import _percentage_reporter
-
-        lines = []
-        report = _percentage_reporter("Reading", 100.0, lines.append)
-
-        for second in range(0, 101, 5):
-            report(float(second))
-
-        assert lines == [f"Reading — {p}%" for p in range(0, 101, 10)]
-
-    def test_an_unknown_duration_gives_no_reporter(self):
-        """There is nothing to take a percentage of, so the extraction stays on
-        its quieter path rather than dividing by zero."""
-        from gpstitch.services.merge_preparation import _percentage_reporter
-
-        assert _percentage_reporter("Reading", 0.0, [].append) is None
-
-    def test_it_never_claims_more_than_a_hundred(self):
-        """ffmpeg can overshoot slightly at the end of a stream."""
-        from gpstitch.services.merge_preparation import _percentage_reporter
-
-        lines = []
-        report = _percentage_reporter("Reading", 10.0, lines.append)
-
-        report(12.0)
-
-        assert lines == ["Reading — 100%"]

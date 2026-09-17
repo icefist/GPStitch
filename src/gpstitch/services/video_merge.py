@@ -18,6 +18,8 @@ from pathlib import Path
 
 from gopro_overlay.ffmpeg import FFMPEG
 
+from gpstitch.services.clip_progress import clip_duration_seconds, percentage_reporter
+
 logger = logging.getLogger(__name__)
 
 # Room for the container's own overhead on top of the copied streams.
@@ -83,14 +85,12 @@ def check_mergeable(paths: list[Path], scratch_dir: Path) -> int:
         Total size in bytes of the source clips.
 
     Raises:
-        MergeNotPossible: clips differ in resolution, codec or pixel format, or
-            the scratch directory has too little room.
+        MergeNotPossible: clips differ in resolution or codec, or the scratch
+            directory has too little room.
 
-    The pixel format matters as much as the codec. A camera that records one
-    clip 10-bit and the next 8-bit reports `hevc` at the same resolution for
-    both, but MP4 stores the codec configuration once per track - so a copied
-    join decodes every frame of the odd clip with the wrong one, and the picture
-    turns to coloured blocks from the join to the end of the video.
+    A differing pixel format is not refused. The camera records some clips
+    10-bit and some 8-bit, and the transport stream the join writes carries each
+    clip's codec configuration with it, so the mixture decodes correctly.
     """
     if len(paths) < 2:
         raise MergeNotPossible("Merging needs at least two clips")
@@ -106,11 +106,6 @@ def check_mergeable(paths: list[Path], scratch_dir: Path) -> int:
         if profile.video_codec != first_profile.video_codec:
             raise MergeNotPossible(
                 f"Clips differ in codec: {paths[0].name} is {first_profile.describe()}, "
-                f"{path.name} is {profile.describe()}. Joining them would produce a broken video."
-            )
-        if profile.pix_fmt != first_profile.pix_fmt:
-            raise MergeNotPossible(
-                f"Clips differ in pixel format: {paths[0].name} is {first_profile.describe()}, "
                 f"{path.name} is {profile.describe()}. Joining them would produce a broken video."
             )
 
@@ -130,67 +125,181 @@ def _gb(size_bytes: float) -> str:
     return f"{size_bytes / 1_000_000_000:.1f}GB"
 
 
-def write_concat_list(paths: list[Path], destination: Path) -> Path:
-    """Write ffmpeg's concat list: one `file '<path>'` per line, in order.
-
-    A literal apostrophe has to be escaped, or it closes the quoted string and
-    ffmpeg reads a truncated path.
-    """
-    lines = [f"file '{str(path).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in paths]
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return destination
-
-
 def join_clips(
     paths: list[Path],
     output: Path,
     on_progress: Callable[[str], None] | None = None,
     on_process: Callable[[subprocess.Popen], None] | None = None,
 ) -> Path:
-    """Concatenate `paths` into `output` without re-encoding.
+    """Concatenate `paths` into `output`, without re-encoding.
+
+    Each clip is remuxed to MPEG-TS in its own pass, and all of those are piped
+    through one ffmpeg that writes the MP4. The indirection is the whole point.
+
+    MP4 stores a track's codec configuration once, so joining clips by copy
+    describes every one of them with the first clip's - and this camera records
+    some clips 10-bit and some 8-bit, which report identically as `hevc` at the
+    same resolution. The result decodes into coloured blocks from the boundary
+    to the end of the video, with nothing said: ffmpeg exits 0 and does not warn
+    even at `-loglevel warning`. A transport stream repeats the configuration
+    before every keyframe, so each clip carries its own, and the `hev1` tag lets
+    the MP4 keep them in the bitstream rather than demanding one for the track.
+
+    ffmpeg's own concat demuxer cannot do this whatever the output container: it
+    hands the packets over already described by the first clip. Hence one pass
+    per clip. They are piped rather than staged on disk because a long ride's
+    clips are tens of gigabytes and writing them twice needs room for both.
 
     Only video and audio are carried across: ffmpeg cannot remux the DJI `djmd`
     telemetry stream, so GPS comes from the original clips instead.
 
-    `on_process` receives the running ffmpeg, so a cancelled job can kill a copy
-    that would otherwise run for a quarter of an hour.
+    `on_process` receives each running ffmpeg, so a cancelled job can kill the
+    work under way rather than waiting out a quarter of an hour.
     """
-    listing = write_concat_list(paths, output.parent / f"{output.stem}_concat.txt")
+    if on_progress:
+        on_progress(f"Joining {len(paths)} clips into one video - copying, not re-encoding")
+    logger.info("Joining %d clips into %s", len(paths), output)
 
-    command = [
+    collector = subprocess.Popen(
+        _collect_command(output, probe_clip(paths[0]).video_codec),
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if on_process:
+        on_process(collector)
+
+    try:
+        offset_s = 0.0
+        for index, path in enumerate(paths, start=1):
+            duration = clip_duration_seconds(path)
+            label = f"Joining {path.name} ({index} of {len(paths)})"
+            if on_progress:
+                on_progress(label)
+            _feed_as_transport_stream(
+                path,
+                collector.stdin,
+                offset_s,
+                percentage_reporter(label, duration, on_progress) if on_progress else None,
+                on_process,
+            )
+            offset_s += duration
+    finally:
+        # Until this closes, the collector waits for more clips that will never
+        # come - including when a clip has just failed and we are on our way out.
+        collector.stdin.close()
+        problems = _drain(collector.stderr, report=None)
+        collector.wait()
+
+    if collector.returncode != 0:
+        raise MergeNotPossible(f"Joining the clips failed: {' '.join(problems).strip()}")
+
+    if on_progress:
+        on_progress("Clips joined")
+    return output
+
+
+# The MP4 sample entry that lets a track keep its codec configuration in the
+# bitstream. The everyday `hvc1` and `avc1` demand a single one for the whole
+# track, which is precisely what clips of differing bit depth do not share.
+_IN_BAND_TAGS = {"hevc": "hev1", "h264": "avc3"}
+
+
+def _collect_command(output: Path, video_codec: str) -> list[str]:
+    """The one ffmpeg that turns the piped transport stream into the MP4."""
+    tag = _IN_BAND_TAGS.get(video_codec)
+    return [
         FFMPEG().binary,
-        "-y",
         "-hide_banner",
         "-loglevel",
         "error",
         "-f",
-        "concat",
-        "-safe",
-        "0",
+        "mpegts",
         "-i",
-        str(listing),
+        "pipe:0",
         "-map",
         "0:v:0",
         "-map",
         "0:a:0?",
         "-c",
         "copy",
+        # An unknown codec gets ffmpeg's default tag: a wrong one is refused
+        # outright, and the join would fail for every clip rather than only the
+        # mismatched ones.
+        *(["-tag:v", tag] if tag else []),
         str(output),
     ]
 
-    if on_progress:
-        on_progress(f"Joining {len(paths)} clips into one video - copying, not re-encoding")
 
-    logger.info("Joining %d clips into %s", len(paths), output)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+# ffmpeg reports its position under either key, both in microseconds.
+_PROGRESS_KEYS = ("out_time_us=", "out_time_ms=")
+
+
+def _feed_as_transport_stream(
+    path: Path,
+    destination,
+    offset_s: float,
+    report: Callable[[float], None] | None,
+    on_process: Callable[[subprocess.Popen], None] | None,
+) -> None:
+    """Stream-copy one clip into the collector's pipe as MPEG-TS.
+
+    The offset matters as much as the copy. Without it every clip's timestamps
+    restart at zero, and the joined file reports the length of a single clip -
+    which is what the renderer sizes its work from.
+    """
+    command = [
+        FFMPEG().binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:2",
+        "-nostats",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy",
+        "-output_ts_offset",
+        f"{offset_s:.6f}",
+        # Left at their defaults the muxer shifts every clip by its own small
+        # preload, which would drift the joins apart over a long ride.
+        "-muxdelay",
+        "0",
+        "-muxpreload",
+        "0",
+        "-f",
+        "mpegts",
+        "pipe:1",
+    ]
+
+    process = subprocess.Popen(command, stdout=destination, stderr=subprocess.PIPE, text=True)
     if on_process:
         on_process(process)
-    _, stderr = process.communicate()
 
-    if process.returncode != 0:
-        raise MergeNotPossible(f"Joining the clips failed: {(stderr or '').strip()}")
+    problems = _drain(process.stderr, report)
+    if process.wait() != 0:
+        raise MergeNotPossible(f"Joining {path.name} failed: {' '.join(problems).strip()}")
 
-    listing.unlink(missing_ok=True)
-    if on_progress:
-        on_progress("Clips joined")
-    return output
+
+def _drain(stderr, report: Callable[[float], None] | None) -> list[str]:
+    """Read ffmpeg's progress as it goes, keeping anything that is not progress.
+
+    `-progress` writes `key=value` lines down the same pipe as the diagnostics,
+    so whatever does not parse as progress is what went wrong.
+    """
+    problems: list[str] = []
+    for raw in stderr:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(_PROGRESS_KEYS):
+            if report:
+                report(int(line.split("=", 1)[1]) / 1_000_000)
+        elif "=" not in line:
+            problems.append(line)
+    return problems

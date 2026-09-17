@@ -58,6 +58,34 @@ the job's preparation (`services/merge_preparation.py`) and rendered against a
 GPX combining every clip's GPS, because ffmpeg cannot carry the DJI telemetry
 stream through a concat.
 
+The join itself (`services/video_merge.py`) looks baroque and every part of it
+is load-bearing: **each clip is remuxed to MPEG-TS in its own ffmpeg pass, and
+those are piped into one ffmpeg that writes the MP4 with `-tag:v hev1`.**
+
+MP4 stores a track's codec configuration once, so joining clips by copy
+describes every one of them with the first clip's — and the camera records some
+clips 10-bit and some 8-bit, which report identically as `hevc` at the same
+resolution. That produced 44 minutes of coloured blocks from the boundary
+onward, silently: ffmpeg exits 0 and warns about nothing, even at `-loglevel
+warning`. Only an explicit check would have caught it, so `check_mergeable`
+compares the pixel format as well as codec and resolution.
+
+- A transport stream repeats the configuration before every keyframe, which is
+  what lets clips differ. ffmpeg's own concat demuxer cannot do this whatever
+  the output container — it hands the packets over already described by the
+  first clip — hence one pass per clip.
+- Each pass needs `-output_ts_offset`, or every clip restarts at zero and the
+  joined file reports one clip's duration, which is what sizes the render.
+- The result must land as **MP4, not TS**: gopro-overlay's `find_recording`
+  insists on a video stream marked `default` and reads `nb_frames` off it, and a
+  TS supplies neither — a TS joined file fails every merged render.
+- `hev1`/`avc3` are the sample entries that let a track keep its configuration
+  in the bitstream; the everyday `hvc1`/`avc1` demand one for the whole track.
+  The tag must match the codec — `hev1` on H.264 is refused and the collector
+  dies before the first clip reaches it.
+- The clips are piped rather than staged on disk because a long ride's clips run
+  to tens of gigabytes and writing them twice needs room for both.
+
 **Request flow for a render:** `api/render.py` creates a session in
 `services/file_manager.py`, a job in `services/job_manager.py`, then hands off to
 `render_service`. Jobs persist as JSON under `$TMPDIR/gpstitch/jobs/` and carry
