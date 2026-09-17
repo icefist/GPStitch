@@ -110,6 +110,44 @@ class TestCheckMergeable:
         ):
             check_mergeable(paths, scratch_dir=tmp_path)
 
+    def test_room_for_the_finished_video_is_reserved_too(self, tmp_path):
+        """The join is only half of what lands on this disk.
+
+        A 55GB ride joins to 55GB and then renders to about as much again, both
+        present at once. Reserving only the join let a four-hour render die of a
+        full disk with no warning at all.
+        """
+        paths = _clips(tmp_path, count=2, size=1024)
+        profile = ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p")
+
+        class Usage:
+            free = 2048 + 256 * 1024 * 1024  # enough for the join, not the render
+
+        with (
+            patch("gpstitch.services.video_merge.probe_clip", return_value=profile),
+            patch("gpstitch.services.video_merge.shutil.disk_usage", return_value=Usage()),
+            pytest.raises(MergeNotPossible, match="disk"),
+        ):
+            check_mergeable(paths, scratch_dir=tmp_path)
+
+    def test_the_refusal_separates_the_join_from_the_render(self, tmp_path):
+        """ "Not enough disk" is useless without knowing what it is being spent on."""
+        paths = _clips(tmp_path, count=2, size=1024)
+        profile = ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p")
+
+        class Usage:
+            free = 512
+
+        with (
+            patch("gpstitch.services.video_merge.probe_clip", return_value=profile),
+            patch("gpstitch.services.video_merge.shutil.disk_usage", return_value=Usage()),
+            pytest.raises(MergeNotPossible) as caught,
+        ):
+            check_mergeable(paths, scratch_dir=tmp_path)
+
+        message = str(caught.value)
+        assert "joined" in message and "finished video" in message
+
     def test_fewer_than_two_clips_is_refused(self, tmp_path):
         """A single clip needs no join; callers must not reach here with one."""
         with pytest.raises(MergeNotPossible, match="two"):

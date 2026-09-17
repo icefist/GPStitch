@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 # Room for the container's own overhead on top of the copied streams.
 _HEADROOM_BYTES = 256 * 1024 * 1024
 
+# What the finished video costs, as a multiple of the clips it came from. The
+# join is lossless, so the joined file matches its sources byte for byte; the
+# render then re-encodes at a similar quality alongside it. A real four-clip
+# ride came out at 0.88x, so charging 1x leaves a little slack without being so
+# pessimistic that it refuses renders which would have fitted.
+_OUTPUT_SIZE_FACTOR = 1.0
+
 
 class MergeNotPossible(Exception):
     """The selected clips cannot be joined. The message says why."""
@@ -112,10 +119,18 @@ def check_mergeable(paths: list[Path], scratch_dir: Path) -> int:
     total = sum(path.stat().st_size for path in paths)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(scratch_dir).free
-    if free < total + _HEADROOM_BYTES:
+
+    # Both files exist at once: the render reads the joined video while writing
+    # the finished one beside it. Counting only the join is how a four-hour
+    # render got to fill the disk and die with nothing to show.
+    rendered = total * _OUTPUT_SIZE_FACTOR
+    needed = total + rendered + _HEADROOM_BYTES
+    if free < needed:
         raise MergeNotPossible(
-            f"Not enough disk to join these clips: {_gb(total + _HEADROOM_BYTES)} needed, "
-            f"{_gb(free)} free in {scratch_dir}"
+            f"Not enough disk in {scratch_dir}: {_gb(needed)} needed "
+            f"({_gb(total)} for the joined clips and about {_gb(rendered)} for the finished video, "
+            f"which are on the disk at the same time), {_gb(free)} free. "
+            f"Free up {_gb(needed - free)}, or choose an output folder on another drive."
         )
 
     return total
