@@ -28,7 +28,7 @@ def _clips(tmp_path, count=2, size=1024):
 class TestCheckMergeable:
     def test_matching_clips_return_their_total_size(self, tmp_path):
         paths = _clips(tmp_path, count=2, size=1024)
-        profile = ClipProfile(width=2688, height=1512, video_codec="hevc")
+        profile = ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p")
 
         with patch("gpstitch.services.video_merge.probe_clip", return_value=profile):
             total = check_mergeable(paths, scratch_dir=tmp_path)
@@ -38,8 +38,8 @@ class TestCheckMergeable:
     def test_a_different_resolution_is_refused(self, tmp_path):
         paths = _clips(tmp_path)
         profiles = [
-            ClipProfile(width=2688, height=1512, video_codec="hevc"),
-            ClipProfile(width=1920, height=1080, video_codec="hevc"),
+            ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p"),
+            ClipProfile(width=1920, height=1080, video_codec="hevc", pix_fmt="yuv420p"),
         ]
 
         with (
@@ -51,8 +51,8 @@ class TestCheckMergeable:
     def test_a_different_codec_is_refused(self, tmp_path):
         paths = _clips(tmp_path)
         profiles = [
-            ClipProfile(width=2688, height=1512, video_codec="hevc"),
-            ClipProfile(width=2688, height=1512, video_codec="h264"),
+            ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p"),
+            ClipProfile(width=2688, height=1512, video_codec="h264", pix_fmt="yuv420p"),
         ]
 
         with (
@@ -61,12 +61,34 @@ class TestCheckMergeable:
         ):
             check_mergeable(paths, scratch_dir=tmp_path)
 
+    def test_a_different_pixel_format_is_refused(self, tmp_path):
+        """A 10-bit clip joined onto 8-bit ones decodes as mush from the join on.
+
+        The camera writes Main 10 for some recordings and Main for others, and
+        both report codec `hevc` at the same resolution - so nothing shallower
+        than the pixel format can tell them apart.
+        """
+        paths = _clips(tmp_path)
+        profiles = [
+            ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p"),
+            ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p10le"),
+        ]
+
+        with (
+            patch("gpstitch.services.video_merge.probe_clip", side_effect=profiles),
+            pytest.raises(MergeNotPossible) as caught,
+        ):
+            check_mergeable(paths, scratch_dir=tmp_path)
+
+        assert "clip1.mp4" in str(caught.value)
+        assert "yuv420p10le" in str(caught.value)
+
     def test_the_refusal_names_both_clips(self, tmp_path):
         """ "They differ" is useless when the batch holds twenty files."""
         paths = _clips(tmp_path)
         profiles = [
-            ClipProfile(width=2688, height=1512, video_codec="hevc"),
-            ClipProfile(width=1920, height=1080, video_codec="hevc"),
+            ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p"),
+            ClipProfile(width=1920, height=1080, video_codec="hevc", pix_fmt="yuv420p"),
         ]
 
         with (
@@ -81,7 +103,7 @@ class TestCheckMergeable:
 
     def test_insufficient_disk_is_refused(self, tmp_path):
         paths = _clips(tmp_path, count=2, size=1024)
-        profile = ClipProfile(width=2688, height=1512, video_codec="hevc")
+        profile = ClipProfile(width=2688, height=1512, video_codec="hevc", pix_fmt="yuv420p")
 
         class Usage:
             free = 512

@@ -35,9 +35,10 @@ class ClipProfile:
     width: int
     height: int
     video_codec: str
+    pix_fmt: str
 
     def describe(self) -> str:
-        return f"{self.width}x{self.height} {self.video_codec}"
+        return f"{self.width}x{self.height} {self.video_codec} {self.pix_fmt}"
 
 
 def _ffprobe_binary() -> str:
@@ -53,7 +54,7 @@ def probe_clip(path: Path) -> ClipProfile:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,codec_name",
+        "stream=width,height,codec_name,pix_fmt",
         "-of",
         "json",
         str(path),
@@ -71,6 +72,7 @@ def probe_clip(path: Path) -> ClipProfile:
         width=int(stream["width"]),
         height=int(stream["height"]),
         video_codec=str(stream["codec_name"]),
+        pix_fmt=str(stream["pix_fmt"]),
     )
 
 
@@ -81,8 +83,14 @@ def check_mergeable(paths: list[Path], scratch_dir: Path) -> int:
         Total size in bytes of the source clips.
 
     Raises:
-        MergeNotPossible: clips differ in resolution or codec, or the scratch
-            directory has too little room.
+        MergeNotPossible: clips differ in resolution, codec or pixel format, or
+            the scratch directory has too little room.
+
+    The pixel format matters as much as the codec. A camera that records one
+    clip 10-bit and the next 8-bit reports `hevc` at the same resolution for
+    both, but MP4 stores the codec configuration once per track - so a copied
+    join decodes every frame of the odd clip with the wrong one, and the picture
+    turns to coloured blocks from the join to the end of the video.
     """
     if len(paths) < 2:
         raise MergeNotPossible("Merging needs at least two clips")
@@ -98,6 +106,11 @@ def check_mergeable(paths: list[Path], scratch_dir: Path) -> int:
         if profile.video_codec != first_profile.video_codec:
             raise MergeNotPossible(
                 f"Clips differ in codec: {paths[0].name} is {first_profile.describe()}, "
+                f"{path.name} is {profile.describe()}. Joining them would produce a broken video."
+            )
+        if profile.pix_fmt != first_profile.pix_fmt:
+            raise MergeNotPossible(
+                f"Clips differ in pixel format: {paths[0].name} is {first_profile.describe()}, "
                 f"{path.name} is {profile.describe()}. Joining them would produce a broken video."
             )
 
