@@ -29,6 +29,7 @@ def apply_patches() -> None:
         logger.debug("Patches already applied, skipping")
         return
 
+    from gpstitch.patches.execution_patches import patch_ffmpeg_wait
     from gpstitch.patches.ffmpeg_gopro_patches import patch_ffmpeg_gopro
     from gpstitch.patches.ffmpeg_overlay_patches import patch_ffmpeg_overlay
     from gpstitch.patches.journey_focus_patches import patch_journey_map_focus
@@ -37,6 +38,7 @@ def apply_patches() -> None:
 
     patch_ffmpeg_gopro()
     patch_ffmpeg_overlay()
+    patch_ffmpeg_wait()
     patch_metric_accessor()
     patch_place_widget()
     patch_journey_map_focus()
