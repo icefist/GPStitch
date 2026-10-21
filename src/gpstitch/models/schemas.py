@@ -160,12 +160,16 @@ class FFmpegProfileOption(BaseModel):
     display_name: str
     description: str
     is_builtin: bool = True
+    recommended: bool = False
 
 
 class FFmpegProfilesResponse(BaseModel):
     """Response from FFmpeg profiles endpoint."""
 
     profiles: list[FFmpegProfileOption]
+    # What a render should start from on this machine ("" = software), until the
+    # user picks a profile themselves.
+    recommended: str = ""
 
 
 class PreviewRequest(BaseModel):

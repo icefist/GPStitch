@@ -126,6 +126,15 @@ class UnifiedApp {
         // Store profiles data for hint display
         this._ffmpegProfiles = profilesData.profiles;
 
+        // Until the user picks a profile themselves, start from the one this
+        // machine renders fastest with. A saved config from before the flag
+        // existed holds '' only because that was the initial value, not a
+        // choice - so it is upgraded too, once.
+        const recommended = profilesData.recommended || '';
+        if (!this.state.quickConfig.ffmpegProfileChosen && this.state.quickConfig.ffmpegProfile !== recommended) {
+            this.state.updateQuickConfig({ ffmpegProfile: recommended });
+        }
+
         this._populateFfmpegProfileSelect(profilesData.profiles, this.state.quickConfig.ffmpegProfile);
 
         // Show initial hint
@@ -144,7 +153,8 @@ class UnifiedApp {
         select.innerHTML = '';
 
         const addOption = (parent, profile) => {
-            parent.appendChild(this._makeOption(profile.name, profile.display_name, {
+            const label = profile.recommended ? `${profile.display_name} (recommended)` : profile.display_name;
+            parent.appendChild(this._makeOption(profile.name, label, {
                 selected: Boolean(selectedValue) && profile.name === selectedValue,
                 disabled: Boolean(profile.disabled),
             }));
@@ -358,7 +368,8 @@ class UnifiedApp {
         // FFmpeg profile change (no preview needed, only affects render)
         this.ffmpegProfileSelect.addEventListener('change', () => {
             const newProfile = this.ffmpegProfileSelect.value;
-            this.state.updateQuickConfig({ ffmpegProfile: newProfile });
+            // A choice now, so the recommendation no longer overrides it.
+            this.state.updateQuickConfig({ ffmpegProfile: newProfile, ffmpegProfileChosen: true });
             this._updateFfmpegProfileHint(newProfile);
         });
 

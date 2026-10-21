@@ -2258,6 +2258,48 @@ class TestGetOutputExtensionForProfile:
         assert get_output_extension_for_profile("weird") == ".mp4"
 
 
+class TestRecommendedFfmpegProfile:
+    """Which profile to start from on this machine.
+
+    On Apple Silicon the software default spends ~10 cores decoding 10-bit HEVC
+    and encoding x264, while the media engine sits idle: the hardware profile
+    rendered the same footage 2.4x faster at the same quality.
+    """
+
+    @pytest.fixture
+    def machine(self, monkeypatch):
+        from gpstitch.services import renderer
+
+        def set_machine(system, arch, encoders):
+            monkeypatch.setattr(renderer.platform, "system", lambda: system)
+            monkeypatch.setattr(renderer.platform, "machine", lambda: arch)
+            monkeypatch.setattr(renderer, "_ffmpeg_has_encoder", lambda name: name in encoders)
+
+        return set_machine
+
+    def test_apple_silicon_with_videotoolbox_gets_the_hardware_profile(self, machine):
+        from gpstitch.services.renderer import recommended_ffmpeg_profile
+
+        machine("Darwin", "arm64", {"h264_videotoolbox"})
+
+        assert recommended_ffmpeg_profile() == "mac"
+
+    def test_other_machines_keep_the_software_default(self, machine):
+        from gpstitch.services.renderer import recommended_ffmpeg_profile
+
+        machine("Linux", "x86_64", {"h264_videotoolbox"})
+
+        assert recommended_ffmpeg_profile() == ""
+
+    def test_an_ffmpeg_built_without_videotoolbox_keeps_the_software_default(self, machine):
+        """Recommending an encoder this ffmpeg does not have fails every render."""
+        from gpstitch.services.renderer import recommended_ffmpeg_profile
+
+        machine("Darwin", "arm64", set())
+
+        assert recommended_ffmpeg_profile() == ""
+
+
 class TestGetAvailableFfmpegProfiles:
     """Tests for get_available_ffmpeg_profiles (built-in + user-defined)."""
 
@@ -2267,6 +2309,24 @@ class TestGetAvailableFfmpegProfiles:
 
         monkeypatch.setattr(settings, "gopro_config_dir", tmp_path)
         return tmp_path
+
+    def test_the_software_option_says_it_is_the_cpu_path(self, config_dir):
+        """Unlabelled, "Default" read as "best" - and on a Mac it is the slowest."""
+        software = next(p for p in get_available_ffmpeg_profiles() if p["name"] == "")
+
+        assert "CPU" in software["display_name"]
+
+    def test_exactly_the_recommended_profile_is_marked(self, config_dir, monkeypatch):
+        monkeypatch.setattr("gpstitch.services.renderer.recommended_ffmpeg_profile", lambda: "mac")
+
+        marked = [p["name"] for p in get_available_ffmpeg_profiles() if p["recommended"]]
+
+        assert marked == ["mac"]
+
+    def test_nothing_is_marked_when_nothing_is_recommended(self, config_dir, monkeypatch):
+        monkeypatch.setattr("gpstitch.services.renderer.recommended_ffmpeg_profile", lambda: "")
+
+        assert not any(p["recommended"] for p in get_available_ffmpeg_profiles())
 
     def test_builtins_only_when_no_user_file(self, config_dir):
         profiles = get_available_ffmpeg_profiles()

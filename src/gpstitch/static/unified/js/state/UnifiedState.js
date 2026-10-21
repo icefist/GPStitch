@@ -33,8 +33,10 @@ class UnifiedState {
             gpxMergeMode: 'OVERWRITE',
             videoTimeAlignment: 'auto',
             timeOffsetSeconds: 0,
-            // FFmpeg profile (empty = default)
+            // FFmpeg profile ('' = software). Starts as the machine's recommended
+            // profile until the user picks one, which sets ffmpegProfileChosen.
             ffmpegProfile: '',
+            ffmpegProfileChosen: false,
             // GPS filter settings (less strict than CLI defaults)
             gpsDopMax: 20,      // CLI default: 10
             gpsSpeedMax: 200    // CLI default: 60 kph

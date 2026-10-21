@@ -1,6 +1,7 @@
 """Integration tests for renderer with real gopro-overlay."""
 
 import json
+import platform
 import shlex
 import subprocess
 import sys
@@ -385,6 +386,79 @@ class TestAlternateLayoutRender:
             assert video_stream["codec_name"] == "mpeg4", (
                 f"Expected mpeg4 from user-defined profile, got {video_stream.get('codec_name')}"
             )
+
+    @pytest.mark.slow
+    @pytest.mark.skipif(
+        platform.system() != "Darwin" or platform.machine() != "arm64", reason="VideoToolbox is Apple Silicon only"
+    )
+    def test_full_render_with_the_recommended_mac_profile(
+        self, clean_file_manager, integration_test_video, monkeypatch, tmp_path
+    ):
+        """The profile the page now starts from has to actually render.
+
+        Hardware decode feeding a CPU overlay feeding a hardware encoder is a
+        different path from the software default, and GPStitch adds its own
+        output flags (+faststart, metadata copy, timecode) on top of the
+        profile's - this proves the combination produces a video.
+        """
+        import tempfile
+
+        from gpstitch.scripts import gopro_dashboard_wrapper
+        from gpstitch.services import file_manager as fm_module
+        from gpstitch.services import renderer as renderer_module
+        from gpstitch.services.renderer import generate_cli_command, recommended_ffmpeg_profile
+
+        if recommended_ffmpeg_profile() != "mac":
+            pytest.skip("this ffmpeg has no h264_videotoolbox")
+        monkeypatch.setattr(renderer_module.settings, "gopro_config_dir", tmp_path)
+
+        session_id = clean_file_manager.create_local_session()
+        clean_file_manager.add_file(
+            session_id=session_id,
+            filename=integration_test_video.name,
+            file_path=integration_test_video,
+            file_type="video",
+            role=FileRole.PRIMARY,
+        )
+        monkeypatch.setattr(fm_module, "file_manager", clean_file_manager)
+
+        with tempfile.TemporaryDirectory(prefix="gpstitch_test_") as tmpdir:
+            output_file = Path(tmpdir) / "mac_profile_output.mp4"
+            cmd, _ = generate_cli_command(
+                session_id=session_id,
+                output_file=str(output_file),
+                layout="default-1920x1080",
+                ffmpeg_profile="mac",
+            )
+            args = shlex.split(cmd)
+            args[0] = str(Path(gopro_dashboard_wrapper.__file__))
+
+            result = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=300)
+
+            assert result.returncode == 0, f"Render with the mac profile failed:\n{result.stderr[-2000:]}"
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(output_file)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            metadata = json.loads(probe.stdout)
+            video = next(s for s in metadata["streams"] if s["codec_type"] == "video")
+            source = json.loads(
+                subprocess.run(
+                    ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", str(integration_test_video)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            source_video = next(s for s in source["streams"] if s["codec_type"] == "video")
+
+            assert video["codec_name"] == "h264"
+            # 8-bit 4:2:0 plays everywhere; full- or limited-range is the source's to say.
+            assert video["pix_fmt"] in ("yuv420p", "yuvj420p")
+            assert video.get("color_range") == source_video.get("color_range")
+            assert float(metadata["format"]["duration"]) > 0
 
 
 @pytest.mark.integration

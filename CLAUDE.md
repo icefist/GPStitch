@@ -118,6 +118,19 @@ everything.
 - `FrameMeta.get()` does **not** interpolate — it returns the previous sample.
   GPX/FIT input looks smooth only because `timeseries_to_framemeta` resamples it
   onto a 0.1s grid with interpolation when the framemeta is built.
+- **A slow render is ffmpeg, not the overlay.** gopro-dashboard's "drawing
+  frames" timer includes time spent blocked writing to ffmpeg's pipe, so it
+  reads as if drawing were the cost. On a real 10-bit DJI ride the Python
+  drawer sat at 0.9% CPU while ffmpeg used ~10 cores on software HEVC decode and
+  x264. Check per-process CPU before optimising anything in the overlay. The
+  `mac` VideoToolbox profile rendered the same footage 2.4x faster at equal
+  quality; `recommended_ffmpeg_profile()` makes the page start from it on Apple
+  Silicon until the user picks a profile.
+- gopro-overlay waits only five minutes for ffmpeg after the last frame, but
+  `+faststart` makes ffmpeg rewrite the whole output then — 28 minutes for 24GB
+  on a drive stuck at USB 2.0 — and a complete video was reported failed.
+  `patches/execution_patches.py` replaces that with an uncapped wait and a
+  heartbeat in the job log. A cancelled job still kills the process group.
 - A geotiler map render costs ~800ms *even from the tile cache* (~115ms when the
   map is aligned to the 256px tile grid). Never render a map per frame, as stock
   `moving_map` does: `services/speed_zoom_map.py` renders tile-aligned chunks

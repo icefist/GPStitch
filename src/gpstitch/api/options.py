@@ -11,6 +11,7 @@ from gpstitch.models.schemas import (
     UnitOption,
     UnitOptionsResponse,
 )
+from gpstitch.services import renderer
 from gpstitch.services.renderer import (
     get_available_ffmpeg_profiles,
     get_available_map_styles,
@@ -59,13 +60,15 @@ async def get_ffmpeg_profiles() -> FFmpegProfilesResponse:
     """Get available FFmpeg encoding profiles."""
     profiles = get_available_ffmpeg_profiles()
     return FFmpegProfilesResponse(
+        recommended=renderer.recommended_ffmpeg_profile(),
         profiles=[
             FFmpegProfileOption(
                 name=p["name"],
                 display_name=p["display_name"],
                 description=p["description"],
                 is_builtin=p.get("is_builtin", True),
+                recommended=p.get("recommended", False),
             )
             for p in profiles
-        ]
+        ],
     )

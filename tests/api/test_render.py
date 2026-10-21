@@ -135,3 +135,19 @@ class TestLayoutsAndOptions:
         data = response.json()
         assert "profiles" in data
         assert len(data["profiles"]) > 0
+
+    async def test_ffmpeg_profiles_say_which_to_start_from(self, async_client, monkeypatch):
+        """The page picks this until the user picks something themselves."""
+        monkeypatch.setattr("gpstitch.services.renderer.recommended_ffmpeg_profile", lambda: "mac")
+
+        data = (await async_client.get("/api/options/ffmpeg-profiles")).json()
+
+        assert data["recommended"] == "mac"
+        assert [p["name"] for p in data["profiles"] if p["recommended"]] == ["mac"]
+
+    async def test_with_nothing_better_the_recommendation_is_software(self, async_client, monkeypatch):
+        monkeypatch.setattr("gpstitch.services.renderer.recommended_ffmpeg_profile", lambda: "")
+
+        data = (await async_client.get("/api/options/ffmpeg-profiles")).json()
+
+        assert data["recommended"] == ""
