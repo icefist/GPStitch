@@ -121,6 +121,55 @@ class TestJourneyMapFocus:
         assert widget.focus.dwell_s == 42
 
 
+class TestSpeedZoom:
+    """`zoom_slow` / `zoom_fast` make the map follow you, zoomed by your speed."""
+
+    def test_setting_a_speed_zoom_gives_the_following_map(self):
+        widget = _factory(FakeFrameMeta()).create_journey_map(
+            _element(x=0, y=0, size=64, zoom_slow=16, zoom_fast=12), entry=lambda: None
+        )
+
+        assert type(widget).__name__ == "SpeedZoomJourneyMap"
+
+    def test_every_speed_zoom_attribute_is_accepted(self):
+        """An attribute the factory does not allow is a hard error at load."""
+        widget = _factory(FakeFrameMeta()).create_journey_map(
+            _element(x=0, y=0, size=64, zoom_slow=17, zoom_fast=11, slow_kph=15, fast_kph=130, zoom_smoothing=6),
+            entry=lambda: None,
+        )
+
+        assert (widget.zoom_slow, widget.zoom_fast) == (17.0, 11.0)
+        assert (widget.slow_kph, widget.fast_kph) == (15.0, 130.0)
+        assert widget.smoothing_s == 6.0
+
+    def test_unset_values_fall_back_to_defaults(self):
+        widget = _factory(FakeFrameMeta()).create_journey_map(
+            _element(x=0, y=0, size=64, zoom_slow=17), entry=lambda: None
+        )
+
+        assert widget.zoom_slow == 17.0
+        assert widget.zoom_fast < widget.zoom_slow
+
+    def test_a_slow_speed_above_the_fast_one_is_refused_at_load(self):
+        """Caught when the template is read, not an hour into a render."""
+        with pytest.raises(ValueError, match="slow_kph"):
+            _factory(FakeFrameMeta()).create_journey_map(
+                _element(x=0, y=0, size=64, zoom_slow=16, slow_kph=100, fast_kph=50), entry=lambda: None
+            )
+
+    def test_a_zoom_the_tile_servers_do_not_have_is_refused_at_load(self):
+        with pytest.raises(ValueError, match="zoom_slow"):
+            _factory(FakeFrameMeta()).create_journey_map(_element(x=0, y=0, size=64, zoom_slow=22), entry=lambda: None)
+
+    def test_speed_zoom_takes_over_from_town_framing(self):
+        """Slowing down through a village already zooms in - the two would fight."""
+        widget = _factory(FakeFrameMeta()).create_journey_map(
+            _element(x=0, y=0, size=64, zoom_slow=16, town_zoom=15), entry=lambda: None
+        )
+
+        assert type(widget).__name__ == "SpeedZoomJourneyMap"
+
+
 class _StubTrack:
     def in_settlement(self, dt):
         return False

@@ -9,7 +9,12 @@ Each framing is rendered once and cached, so the image is rebuilt only when you
 enter or leave somewhere - not per frame. Within a view the marker moves over a
 static image, exactly as the unmodified widget behaves.
 
-Without the attribute the widget is left completely alone.
+With `zoom_slow` / `zoom_fast` instead, the map follows you and its zoom tracks
+your speed: close through a village, wide on the open road (speed_zoom_map).
+That supersedes the settlement framing - slowing down through a village zooms
+in by itself - so when both are set, speed zoom wins.
+
+Without any of these attributes the widget is left completely alone.
 """
 
 import logging
@@ -30,9 +35,23 @@ _DEFAULT_TOWN_DWELL_S = 15.0
 # Matches the cap the unmodified journey map applies to its own whole-route view.
 _MAX_ZOOM = 18
 
+# Speed zoom: fully in at or below the slow speed, fully out at or above the
+# fast one. 16 shows a village's streets on a ~450px map; 12 shows ~10km of road.
+_DEFAULT_ZOOM_SLOW = 16.0
+_DEFAULT_ZOOM_FAST = 12.0
+_DEFAULT_SLOW_KPH = 20.0
+_DEFAULT_FAST_KPH = 110.0
+
+# Seconds of travel the speed is measured over. Shorter reacts sooner but lets a
+# bend or a jumpy fix nudge the zoom; longer is calmer. Centred on the moment,
+# so the map starts widening slightly before you accelerate, not after.
+_DEFAULT_ZOOM_SMOOTHING_S = 4.0
+
+_SPEED_ZOOM_ATTRIBUTES = ("zoom_slow", "zoom_fast", "slow_kph", "fast_kph", "zoom_smoothing")
+
 # Ours alone. The stock widget validates its attributes strictly, so these
 # have to come off the element before it is handed anything.
-_OUR_ATTRIBUTES = ("town_zoom", "town_dwell")
+_OUR_ATTRIBUTES = ("town_zoom", "town_dwell", *_SPEED_ZOOM_ATTRIBUTES)
 
 
 def patch_journey_map_focus() -> None:
@@ -40,7 +59,7 @@ def patch_journey_map_focus() -> None:
     import geotiler
     from gopro_overlay import layout_xml
     from gopro_overlay.journey import Journey
-    from gopro_overlay.layout_xml import at, fattrib, iattrib
+    from gopro_overlay.layout_xml import FloatRange, at, fattrib, iattrib
     from gopro_overlay.layout_xml_attribute import allow_attributes
     from gopro_overlay.rdp import rdp
     from gopro_overlay.widgets.map import MaybeRoundedBorder, draw_marker
@@ -53,6 +72,7 @@ def patch_journey_map_focus() -> None:
 
     from gpstitch.config import settings
     from gpstitch.services.map_focus import MapFocus, route_bounds
+    from gpstitch.services.speed_zoom_map import SpeedZoomJourneyMap
 
     original = layout_xml.Widgets.create_journey_map
 
@@ -142,8 +162,45 @@ def patch_journey_map_focus() -> None:
                 draw_marker(ImageDraw.Draw(frame), backing.rev_geocode((location.lon, location.lat)), 6)
             image.alpha_composite(frame, self.at.tuple())
 
-    @allow_attributes({"x", "y", "size", "corner_radius", "opacity", "town_zoom", "town_dwell"})
+    def create_speed_zoom_map(self, element, entry):
+        zoom_range = FloatRange(1.0, float(_MAX_ZOOM))
+        slow_kph = fattrib(element, "slow_kph", d=_DEFAULT_SLOW_KPH)
+        fast_kph = fattrib(element, "fast_kph", d=_DEFAULT_FAST_KPH)
+        if not 0 < slow_kph < fast_kph:
+            raise ValueError(
+                f"journey_map needs 0 < slow_kph < fast_kph, not slow_kph={slow_kph:g} fast_kph={fast_kph:g}"
+            )
+        if "town_zoom" in element.attrib:
+            logger.warning("journey_map has both town_zoom and speed zoom set; speed zoom is used")
+
+        size = iattrib(element, "size", d=256)
+        widget = SpeedZoomJourneyMap(
+            framemeta=self.framemeta,
+            entry=entry,
+            renderer=self.renderer,
+            privacy=self.privacy,
+            size=size,
+            border=MaybeRoundedBorder(
+                size=size,
+                corner_radius=iattrib(element, "corner_radius", d=0),
+                opacity=fattrib(element, "opacity", d=0.7),
+            ),
+            zoom_slow=fattrib(element, "zoom_slow", d=_DEFAULT_ZOOM_SLOW, r=zoom_range),
+            zoom_fast=fattrib(element, "zoom_fast", d=_DEFAULT_ZOOM_FAST, r=zoom_range),
+            slow_kph=slow_kph,
+            fast_kph=fast_kph,
+            smoothing_s=fattrib(element, "zoom_smoothing", d=_DEFAULT_ZOOM_SMOOTHING_S, r=FloatRange(0.0, 60.0)),
+        )
+        widget.at = at(element)
+        return widget
+
+    @allow_attributes(
+        {"x", "y", "size", "corner_radius", "opacity", "town_zoom", "town_dwell", *_SPEED_ZOOM_ATTRIBUTES}
+    )
     def create_journey_map(self, element, entry, **kwargs):
+        if any(name in element.attrib for name in _SPEED_ZOOM_ATTRIBUTES):
+            return create_speed_zoom_map(self, element, entry)
+
         town_zoom = iattrib(element, "town_zoom", d=0, r=range(0, _MAX_ZOOM + 1))
         if not town_zoom:
             # Absent, or switched off: the stock widget, untouched. Its own

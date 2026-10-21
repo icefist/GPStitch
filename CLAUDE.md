@@ -115,6 +115,13 @@ everything.
   (`services/place_track.py`) for this reason.
 - `find_recording()` runs even under `--use-gpx-only`, which is where "Unable to
   locate metadata stream - is it a GoPro file" comes from.
+- `FrameMeta.get()` does **not** interpolate — it returns the previous sample.
+  GPX/FIT input looks smooth only because `timeseries_to_framemeta` resamples it
+  onto a 0.1s grid with interpolation when the framemeta is built.
+- A geotiler map render costs ~800ms *even from the tile cache* (~115ms when the
+  map is aligned to the 256px tile grid). Never render a map per frame, as stock
+  `moving_map` does: `services/speed_zoom_map.py` renders tile-aligned chunks
+  once and cuts each frame from them in ~5ms.
 
 ## DJI embedded GPS
 
