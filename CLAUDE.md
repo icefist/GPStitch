@@ -148,7 +148,10 @@ stages each costing 107s just look like "loading is slow". Time stages
 individually before optimising, and measure end-to-end after.
 
 The GPS remote can drop its link and re-report a stale fix, so the parser also
-repairs telemetry: `clock_unreliable()` spots a long run of one timestamp and
+repairs telemetry: `repair_clock_blips()` (in `parse_dji_meta`, so every reader
+gets it) puts back the odd sample stamped by the camera's clock instead of the
+remote's — about four hours out, and enough on its own to throw a whole clip
+past the end of a merged video; `clock_unreliable()` spots a long run of one timestamp and
 `rebuild_timestamps()` re-derives the axis from the sample index at the stream's
 declared rate; `position_frozen()` spots a fix that never moves, and the layout
 then loses the widgets that need movement.

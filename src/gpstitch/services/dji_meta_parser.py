@@ -430,6 +430,89 @@ def read_declared_sample_rate(raw_data: bytes) -> float | None:
 _MAX_STUCK_RUN_S = 5.0
 
 
+# A blip is at most a second of samples on the wrong clock. A clock that stays
+# elsewhere for longer is a real jump - clip 0024 jumped four hours and stayed -
+# and is left alone, as is a stall, which clock_unreliable deals with.
+_MAX_BLIP_FRAMES = 30
+
+# Adjacent samples on one clock differ by 0 or 1 second (one-second resolution).
+# The blips seen so far were four hours out, so anything this tight is sound.
+_BLIP_TOLERANCE_S = 5.0
+
+
+def repair_clock_blips(
+    points: list[DjiMetaPoint],
+    *,
+    max_frames: int = _MAX_BLIP_FRAMES,
+    tolerance_s: float = _BLIP_TOLERANCE_S,
+) -> list[DjiMetaPoint]:
+    """Put back samples whose timestamp briefly reads a different clock.
+
+    One real clip had 79,726 samples on the GPS remote's clock and two stamped
+    with the camera's, about four hours earlier, each between neighbours that
+    agreed with each other. The positions were right. But anything that takes a
+    clip's start from its earliest timestamp - joining clips into one timeline,
+    reading a recording's start time - then started the clip four hours early,
+    and in a merged render the whole clip's track fell past the end of the
+    video.
+
+    A blip is a run of at most `max_frames` samples that disagree with the
+    samples either side, where those two agree. Its timestamps are interpolated
+    between them by frame index. At either end of the track there is only one
+    side, so a short run is put back onto it only when that side is long enough
+    to be the clock the clip actually runs on.
+    """
+    if len(points) < 3:
+        return points
+
+    def agree(a: DjiMetaPoint, b: DjiMetaPoint) -> bool:
+        return abs((a.timestamp - b.timestamp).total_seconds()) <= tolerance_s
+
+    # Runs of samples on one clock, as (first index, last index).
+    runs: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, len(points)):
+        if not agree(points[i - 1], points[i]):
+            runs.append((start, i - 1))
+            start = i
+    runs.append((start, len(points) - 1))
+    if len(runs) == 1:
+        return points
+
+    def long_run(run: tuple[int, int]) -> bool:
+        return run[1] - run[0] + 1 > max_frames
+
+    repaired = list(points)
+    count = 0
+    for k, run in enumerate(runs):
+        first, last = run
+        if last - first + 1 > max_frames:
+            continue
+        before = runs[k - 1] if k > 0 else None
+        after = runs[k + 1] if k + 1 < len(runs) else None
+
+        if before and after:
+            left, right = points[before[1]], points[after[0]]
+            if not agree(left, right):
+                continue
+        elif after and long_run(after):
+            left = right = points[after[0]]
+        elif before and long_run(before):
+            left = right = points[before[1]]
+        else:
+            continue
+
+        span = right.frame_idx - left.frame_idx
+        for i in range(first, last + 1):
+            share = (points[i].frame_idx - left.frame_idx) / span if span else 0.0
+            repaired[i] = dc_replace(points[i], timestamp=left.timestamp + (right.timestamp - left.timestamp) * share)
+        count += last - first + 1
+
+    if count:
+        logger.info("Put back %d GPS timestamps that briefly read a different clock", count)
+    return repaired
+
+
 def clock_unreliable(points: list[DjiMetaPoint], *, sample_rate_hz: float | None) -> bool:
     """Whether the GPS clock stalls for long enough to be untrustworthy.
 
@@ -791,7 +874,9 @@ def parse_dji_meta(raw_data: bytes) -> list[DjiMetaPoint]:
             frame_idx += 1
         # Skip any non-field-3 data (shouldn't happen but be safe)
 
-    return points
+    # Every reader comes through here - whole file, windows, the first point -
+    # so a stray timestamp is fixed once for all of them.
+    return repair_clock_blips(points)
 
 
 def parse_dji_meta_file(
